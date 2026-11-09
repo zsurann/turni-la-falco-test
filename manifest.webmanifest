@@ -1,7 +1,7 @@
 {
   "name": "I miei turni · La Falco (TEST)",
   "short_name": "Turni TEST",
-  "description": "I tuoi turni di lavoro letti dai PDF, sempre a portata di mano.",
+  "description": "I tuoi turni di lavoro pubblicati dal responsabile, sempre a portata di mano.",
   "lang": "it",
   "id": "/",
   "start_url": "./?source=pwa",
