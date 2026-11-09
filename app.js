@@ -1,13 +1,12 @@
-import './polyfill.js';
-import * as pdfjsLib from './pdf.min.mjs';
-pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('./pdf.worker.min.mjs', import.meta.url).href;
+/* I miei turni · La Falco — app dei turnisti.
+   I turni arrivano dall'app del responsabile tramite il Worker "turni-sync" (config.js: TURNI_API);
+   i promemoria push passano dal Worker "turni-push" (config.js: TURNI_PUSH). */
 
-const P = window.TurniParser;
-const LS_DOCS = 'turni.docs.v2';
+const P = window.TurniShifts;
 const LS_NAME = 'turni.name.v1';
 const LS_OV = 'turni.overrides.v1';
 const LS_ONB = 'turni.onboarded.v1';
-const LS_GUIDE = 'turni.guide.v1';
+const LS_REMOTE = 'turni.remote.v1', LS_RVER = 'turni.remote.ver', LS_RCHK = 'turni.remote.checked';
 
 const MESI = ['Gennaio', 'Febbraio', 'Marzo', 'Aprile', 'Maggio', 'Giugno', 'Luglio', 'Agosto', 'Settembre', 'Ottobre', 'Novembre', 'Dicembre'];
 const GIORNI = ['Domenica', 'Lunedì', 'Martedì', 'Mercoledì', 'Giovedì', 'Venerdì', 'Sabato'];
@@ -20,9 +19,10 @@ const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch { return d; } },
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* ignore */ } },
 };
+// I PDF caricati a mano non esistono più: tolgo quelli salvati dalle versioni precedenti
+try { localStorage.removeItem('turni.docs.v2'); localStorage.removeItem('turni.guide.v1'); } catch { /* ignore */ }
 
-const LS_REMOTE = 'turni.remote.v1', LS_RVER = 'turni.remote.ver';
-let docs = store.get(LS_DOCS, []).concat(store.get(LS_REMOTE, []));
+let docs = store.get(LS_REMOTE, []);
 let name = store.get(LS_NAME, '');
 let overrides = store.get(LS_OV, {});
 let view = 'next';
@@ -34,36 +34,54 @@ function el(tag, cls, text) {
   if (text !== undefined) e.textContent = text;
   return e;
 }
-function dateOf(iso) { const [y, m, d] = iso.split('-').map(Number); return new Date(y, m - 1, d); }
+function dateOf(s) { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); }
 const fmtLong = (d) => GIORNI[d.getDay()] + ' ' + d.getDate() + ' ' + MESI[d.getMonth()];
 const fmtH = (h) => (Number.isInteger(h) ? h : h.toFixed(1).replace('.', ',')) + ' ore';
+const pad2 = (n) => String(n).padStart(2, '0');
+const hhmm = (d) => pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+const normName = (s) => String(s || '').trim().toUpperCase().replace(/\s+/g, ' ');
 
-function classifyText(raw) {
-  const t = String(raw || '').toUpperCase().replace(/[_.]+/g, ' ');
-  const r = {};
-  if (/\bCAMPO\s+SUD\s+ROM\b/.test(t)) return { campo: 'Sud', ruolo: 'Sud Rom' };
-  if (/\bCAFASSO\b/.test(t)) return { campo: 'Cafasso', ruolo: 'Parco Cafasso' };
-  if (/\bROND[AE]\b/.test(t)) r.ruolo = 'Ronda';
-  else if (/\bTERR[AE]\s+DEL\s+SOLE\b/.test(t)) r.ruolo = 'Gabbiotto';
-  const lato = /\bLATO\s+(NORD|SUD)\b/.exec(t);
-  if (lato) r.lato = lato[1] === 'NORD' ? 'Nord' : 'Sud';
-  let c = /\bCAMPO\s+(NORD|SUD)\b/.exec(t);
-  if (!c) c = /\b(NORD|SUD)\b/.exec(t.replace(/\bLATO\s+(NORD|SUD)\b/g, ' '));
-  if (c) r.campo = c[1] === 'NORD' ? 'Nord' : 'Sud';
-  return r;
+/* ---------- Postazioni e categorie (come nell'app del responsabile) ---------- */
+// Ogni documento pubblicato porta la categoria (CAMPO SUD, CAMPO NORD, PARCHI, ...) e il nome
+// della postazione (uiTitle): si usano quelli, senza indovinare dal titolo.
+const CAT_ORDER = ['CAMPO SUD', 'CAMPO NORD', 'PARCHI'];
+const SMALL_WORDS = new Set(['lato', 'del', 'della', 'dei', 'di', 'e', 'la', 'il', 'lo', 'le', 'al', 'alla']);
+const niceCase = (s) => String(s || '').toLowerCase().split(' ')
+  .map((w, i) => (i > 0 && SMALL_WORDS.has(w)) ? w : w.replace(/^(\p{L})/u, (c) => c.toUpperCase())).join(' ');
+const normT = (s) => String(s || '').trim().toUpperCase().replace(/[_.]+/g, ' ').replace(/\s+/g, ' ');
+function guessCat(t) {
+  if (/\bPARCO\b|\bPARCHI\b|\bVILLA\b|\bGIARDIN|\bCAFASSO\b/.test(t)) return 'PARCHI';
+  if (/\bCAMPO\s+NORD\b/.test(t)) return 'CAMPO NORD';
+  if (/\bCAMPO\s+SUD\b/.test(t)) return 'CAMPO SUD';
+  if (/\bNORD\b/.test(t)) return 'CAMPO NORD';
+  if (/\bSUD\b/.test(t)) return 'CAMPO SUD';
+  return 'ALTRO';
 }
-function infoOf(zone, src) {
-  const a = classifyText(zone), b = classifyText(src);
-  return { campo: a.campo || b.campo || '', ruolo: a.ruolo || b.ruolo || '', lato: a.lato || b.lato || '' };
+const infoCache = new WeakMap();
+function docInfo(d) {
+  if (!d) return { cat: '', post: '', short: '', catName: '', label: '' };
+  if (infoCache.has(d)) return infoCache.get(d);
+  const post = normT(d.uiTitle || d.title || d.id);
+  let cat = normT(d.category);
+  if (cat === 'PARCO CAFASSO') cat = 'PARCHI';
+  if (!cat) cat = guessCat(post);
+  const inside = post.startsWith(cat + ' ');
+  const short = niceCase(inside ? post.slice(cat.length + 1) : post);
+  const info = { cat, post, short, catName: niceCase(cat), label: inside ? short + ' · ' + niceCase(cat) : niceCase(post) };
+  infoCache.set(d, info);
+  return info;
 }
-function labelOf(c) {
-  if (c.ruolo === 'Sud Rom' || c.ruolo === 'Parco Cafasso') return c.ruolo;
-  if (!c.ruolo) return '';
-  if (c.ruolo === 'Ronda' && c.campo === 'Nord' && c.lato) return 'Ronda Lato ' + c.lato;
-  return c.ruolo + (c.campo ? ' ' + c.campo : '');
+const docById = (id) => docs.find((d) => d.id === id);
+const roleOf = (s) => docInfo(docById(s.src)).label;
+const catRank = (c) => { const i = CAT_ORDER.indexOf(c); return i < 0 ? 99 : i; };
+function categories() {
+  return [...new Set(docs.map((d) => docInfo(d).cat))].sort((a, b) => catRank(a) - catRank(b) || a.localeCompare(b, 'it'));
 }
-const roleOf = (s) => labelOf(infoOf(s.zone, s.src));
+function docsOfCat(cat) {
+  return docs.filter((d) => docInfo(d).cat === cat).sort((a, b) => docInfo(a).post.localeCompare(docInfo(b).post, 'it'));
+}
 
+/* ---------- Turni ---------- */
 function decorate(s) {
   const day = dateOf(s.date);
   const [sh, sm] = s.start.split(':').map(Number);
@@ -78,18 +96,18 @@ function decorate(s) {
   else if (startAt.getHours() < 12) type = { k: 'm', label: 'Mattina' };
   else type = { k: 'p', label: 'Pomeriggio' };
   const out = { ...s, day, startAt, endAt, hours: (endAt - startAt) / 36e5, type, night: endAt > nextMidnight, role: roleOf(s) };
-  if (out.night && !s.rest) {
-    const info = infoOf(s.zone, s.src);
-    if (info.campo === 'Sud' && info.ruolo === 'Gabbiotto') out.mates = rondaSudCambio(nextMidnight, s.end);
+  // Notte al Gabbiotto di Campo Sud: il cambio arriva dalla Ronda di Campo Sud
+  if (out.night && !s.rest && docInfo(docById(s.src)).post === 'CAMPO SUD GABBIOTTO') {
+    const mates = rondaSudCambio(nextMidnight, s.end);
+    if (mates.length) out.mates = mates;
   }
   return out;
 }
-function iso(d) { return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
+function iso(d) { return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()); }
 function rondaSudCambio(day, at) {
   const names = [];
   docs.forEach((d) => {
-    const i = infoOf(d.title, d.id);
-    if (i.ruolo !== 'Ronda' || i.campo !== 'Sud') return;
+    if (docInfo(d).post !== 'CAMPO SUD RONDA') return;
     P.dayOperators(d, iso(day)).forEach((op) => {
       if (op.start === at && !P.nameMatches(op.name, name) && !names.includes(op.name)) names.push(op.name);
     });
@@ -104,7 +122,9 @@ function build(base, orig) {
   m.mates = (m.mates || []).filter((x) => !P.nameMatches(x, name));
   return decorate(m);
 }
+let shiftsCache = null;
 function allShifts() {
+  if (shiftsCache) return shiftsCache;
   const out = [], have = new Set();
   docs.forEach((d) => P.findShifts(d, name).forEach((s) => {
     have.add(s.date);
@@ -135,8 +155,10 @@ function allShifts() {
     });
   }
   out.sort((a, b) => a.startAt - b.startAt);
+  shiftsCache = out;
   return out;
 }
+const invalidate = () => { shiftsCache = null; };
 function startOfToday() { const n = new Date(); return new Date(n.getFullYear(), n.getMonth(), n.getDate()); }
 function relLabel(s, now) {
   if (s.startAt <= now && s.endAt >= now) return 'In corso';
@@ -147,8 +169,9 @@ function relLabel(s, now) {
 }
 
 function render() {
+  invalidate();
   $('#whoName').textContent = name;
-  $('#nameInput').value = name;
+  if (document.activeElement !== $('#nameInput')) $('#nameInput').value = name;
 
   const now = new Date();
   const shifts = allShifts();
@@ -157,16 +180,20 @@ function render() {
   renderHero(upcoming[0], now);
   renderStats(shifts);
   renderList(shifts, now);
-  renderDocs();
+  renderSource();
+  fillNameList();
   schedulePush();
 
   const empty = $('#empty');
-  if (!docs.length) {
+  if (!API_URL) {
     empty.hidden = false;
-    empty.replaceChildren(el('b', '', 'Nessun turno da mostrare'), el('p', '', 'Carica il PDF dei turni qui sotto: troverò io i tuoi.'));
+    empty.replaceChildren(el('b', '', 'App non collegata'), el('p', '', 'Manca l\'indirizzo del server dei turni in config.js.'));
+  } else if (!docs.length) {
+    empty.hidden = false;
+    empty.replaceChildren(el('b', '', 'Nessun turno pubblicato'), el('p', '', 'I turni compariranno qui appena il responsabile li pubblica.'));
   } else if (!shifts.length) {
     empty.hidden = false;
-    empty.replaceChildren(el('b', '', 'Nessun turno per ' + name), el('p', '', 'Nei PDF caricati non compare questo nome. Controlla come è scritto qui sotto.'));
+    empty.replaceChildren(el('b', '', 'Nessun turno per ' + name), el('p', '', 'Nei turni pubblicati non trovo questo nome. Sceglilo dall\'elenco qui sotto, scritto come lo scrive il responsabile.'));
   } else {
     empty.hidden = true;
   }
@@ -193,13 +220,13 @@ function renderHero(s, now) {
   );
 }
 
-const monthKey = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+const monthKey = (d) => d.getFullYear() + '-' + pad2(d.getMonth() + 1);
 const fmtNum = (h) => { const r = Math.round(h * 10) / 10; return Number.isInteger(r) ? String(r) : r.toFixed(1).replace('.', ','); };
 let statsKey = null;
 let statsKeys = [];
 function renderStats(shifts) {
   const box = $('#stats');
-  statsKeys = [...new Set(shifts.map((s) => monthKey(s.day)))].sort();
+  statsKeys = [...new Set(shifts.filter((s) => !s.pending).map((s) => monthKey(s.day)))].sort();
   if (!statsKeys.length) { box.hidden = true; return; }
   if (!statsKeys.includes(statsKey)) {
     const cur = monthKey(new Date());
@@ -222,7 +249,7 @@ function renderStats(shifts) {
 
 const RATE = 6;
 const eur = (v) => new Intl.NumberFormat('it-IT', { style: 'currency', currency: 'EUR' }).format(v);
-let payOpen = false, payVal = 0, payRaf = 0;
+let payOpen = false, payVal = 0, payRaf = 0, payTarget = 0;
 function animatePay(to) {
   cancelAnimationFrame(payRaf);
   const from = payVal, t0 = performance.now(), dur = 900;
@@ -247,7 +274,6 @@ function updatePay(hours, y, m) {
   if (payOpen) animatePay(total); else { payVal = 0; $('#payAmt').textContent = eur(0); }
   payTarget = total;
 }
-let payTarget = 0;
 function togglePay() {
   payOpen = !payOpen;
   $('#pay').classList.toggle('open', payOpen);
@@ -292,7 +318,7 @@ function renderList(shifts, now) {
       const ps = el('div', 's-sub');
       ps.append(el('span', 'chip wait', 'In attesa'));
       ps.append(el('span', '', one ? 'Il ' + s.day.getDate() + ' ' + MESI[s.day.getMonth()].toLowerCase() : 'Dal ' + s.day.getDate() + ' al ' + d2.getDate() + ' ' + MESI[d2.getMonth()].toLowerCase()));
-      ps.append(el('span', 'note', 'Si aggiorneranno quando aggiungi i nuovi PDF'));
+      ps.append(el('span', 'note', 'Compariranno quando il responsabile li pubblica'));
       pbody.append(pm, ps);
       pc.append(pb, pbody);
       list.append(pc);
@@ -343,29 +369,30 @@ function renderList(shifts, now) {
   });
 }
 
-function renderDocs() {
-  const ul = $('#docs');
-  ul.replaceChildren();
-  docs.forEach((d) => {
-    const li = el('li');
-    const nm = el('div', 'nm');
-    const n = P.findShifts(d, name).length;
-    nm.append(el('b', '', d.id.replace(/\.pdf$/i, '').replace(/_/g, ' ').trim()), el('span', '', (d.remote ? 'Dal responsabile · ' : '') + n + (n === 1 ? ' turno tuo' : ' turni tuoi') + ' · ' + d.rows.length + ' giorni'));
-    const btn = el('button', 'x', '✕');
-    btn.type = 'button';
-    btn.setAttribute('aria-label', 'Rimuovi ' + d.id);
-    btn.title = 'Rimuovi';
-    btn.addEventListener('click', () => {
-      docs = docs.filter((x) => x.id !== d.id);
-      store.set(LS_DOCS, docs.filter((x) => !x.remote));
-      setMsg('', '');
-      render();
-    });
-    if (d.warn) nm.append(el('em', 'warn', '⚠ ' + d.warn));
-    li.append(nm);
-    if (!d.remote) li.append(btn);
-    ul.append(li);
-  });
+/* ---------- Provenienza dei turni e nome ---------- */
+function renderSource() {
+  const box = $('#source');
+  const ver = store.get(LS_RVER, null), chk = store.get(LS_RCHK, null);
+  const lines = [];
+  if (!API_URL) lines.push('Server dei turni non configurato.');
+  else if (!docs.length) lines.push('Il responsabile non ha ancora pubblicato turni.');
+  else {
+    const months = [...new Set(docs.map((d) => d.month || (d.rows[0] && d.rows[0].date.slice(0, 7))).filter(Boolean))].sort();
+    const fromTo = months.length ? MESI[+months[0].slice(5) - 1].toLowerCase() + (months.length > 1 ? ' – ' + MESI[+months[months.length - 1].slice(5) - 1].toLowerCase() : '') : '';
+    const pv = Number(ver) > 1e12 ? new Date(Number(ver)) : null;
+    lines.push((pv ? 'Pubblicati il ' + pv.getDate() + ' ' + MESI[pv.getMonth()].toLowerCase() + ' alle ' + hhmm(pv) : 'Turni pubblicati') + (fromTo ? ' · ' + fromTo : ''));
+  }
+  if (chk) lines.push('Ultimo controllo alle ' + hhmm(new Date(chk)));
+  box.replaceChildren(...lines.map((t, i) => el(i ? 'span' : 'b', '', t)));
+}
+// Elenco dei nomi presenti nei turni: si sceglie il proprio invece di scriverlo a memoria
+let namesSig = '';
+function fillNameList() {
+  const names = P.allNames(docs);
+  const sig = names.join('|');
+  if (sig === namesSig) return;
+  namesSig = sig;
+  $('#nameList').replaceChildren(...names.map((n) => { const o = el('option'); o.value = n; return o; }));
 }
 
 let toastTimer;
@@ -374,11 +401,12 @@ function toast(msg) {
   t.textContent = msg;
   t.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { t.hidden = true; }, 2400);
+  toastTimer = setTimeout(() => { t.hidden = true; }, 2600);
 }
 
+/* ---------- Pannello: modifica turno, colleghi, promemoria ---------- */
 function openSheet(shift, opener, mode) {
-  wiz = { shift, step: 1, campo: '', ruolo: '', opener, mode: mode || 'edit' };
+  wiz = { shift, step: 1, cat: '', docId: '', opener, mode: mode || 'edit' };
   $('#sheet').hidden = false;
   document.body.classList.add('lock');
   renderSheet();
@@ -410,21 +438,6 @@ function backBtn(step) {
   b.addEventListener('click', () => { wiz.step = step; renderSheet(); });
   return b;
 }
-function docsFor(campo, ruolo) {
-  return docs.map((d) => ({ d, c: infoOf(d.title, d.id) })).filter((x) => x.c.campo === campo && x.c.ruolo === ruolo);
-}
-
-// Opzioni di modifica disponibili in base ai PDF caricati
-const CAMPI_ORDER = ['Sud', 'Nord', 'Cafasso'];
-const RUOLI_ORDER = ['Ronda', 'Gabbiotto', 'Sud Rom'];
-function availableCampi() {
-  const found = new Set(docs.map((d) => infoOf(d.title, d.id)).filter((c) => c.ruolo).map((c) => c.campo));
-  return CAMPI_ORDER.filter((c) => found.has(c));
-}
-function availableRoles(campo) {
-  const found = new Set(docs.map((d) => infoOf(d.title, d.id)).filter((c) => c.campo === campo).map((c) => c.ruolo));
-  return RUOLI_ORDER.filter((r) => found.has(r));
-}
 
 function commit(entry, msg) {
   if (entry) overrides[wiz.shift.key] = entry; else delete overrides[wiz.shift.key];
@@ -445,13 +458,18 @@ function renderSheet() {
   $('#shSteps').replaceChildren(...[1, 2, 3].map((n) => el('i', n <= wiz.step ? 'on' : '')));
   body.replaceChildren();
 
+  // 1) categoria (Campo Sud, Campo Nord, Parchi, ...) oppure riposo
   if (wiz.step === 1) {
-    body.append(el('p', 'q', 'Campo o riposo?'));
-    availableCampi().forEach((c) => {
-      if (c === 'Cafasso') body.append(opt('Parco Cafasso', '', () => { wiz.campo = 'Cafasso'; wiz.ruolo = 'Parco Cafasso'; wiz.step = 3; renderSheet(); }, 'big'));
-      else body.append(opt('Campo ' + c, '', () => { wiz.campo = c; wiz.step = 2; renderSheet(); }, 'big'));
+    body.append(el('p', 'q', 'Dove hai lavorato?'));
+    categories().forEach((c) => {
+      body.append(opt(niceCase(c), docsOfCat(c).map((d) => docInfo(d).short).join(', '), () => {
+        wiz.cat = c;
+        const ds = docsOfCat(c);
+        if (ds.length === 1) { wiz.docId = ds[0].id; wiz.step = 3; } else wiz.step = 2;
+        renderSheet();
+      }, 'big'));
     });
-    if (!docs.length) body.append(el('p', 'none', 'Non hai ancora caricato nessun PDF: carica i tuoi turni per poter scegliere il campo.'));
+    if (!docs.length) body.append(el('p', 'none', 'Il responsabile non ha ancora pubblicato turni.'));
     if (!(s.auto && !s.mod)) {
       const rest = opt('Riposo', 'Imposta questo giorno come libero', () => commit(s.auto ? null : { rest: true }, 'Riposo impostato'), 'big rest');
       rest.insertAdjacentHTML('afterbegin', MOON);
@@ -466,36 +484,28 @@ function renderSheet() {
     return;
   }
 
+  // 2) postazione della categoria
   if (wiz.step === 2) {
-    body.append(backBtn(1), el('p', 'q', 'Che ruolo? · Campo ' + wiz.campo));
-    const roles = availableRoles(wiz.campo);
-    roles.forEach((r) => body.append(opt(r, '', () => { wiz.ruolo = r; wiz.step = 3; renderSheet(); }, 'big')));
+    body.append(backBtn(1), el('p', 'q', 'Quale postazione? · ' + niceCase(wiz.cat)));
+    docsOfCat(wiz.cat).forEach((d) => body.append(opt(docInfo(d).short, '', () => { wiz.docId = d.id; wiz.step = 3; renderSheet(); }, 'big')));
     return;
   }
 
-  const place = wiz.campo === 'Cafasso' ? 'Parco Cafasso' : 'Campo ' + wiz.campo + ' · ' + wiz.ruolo;
-  body.append(backBtn(wiz.campo === 'Cafasso' ? 1 : 2), el('p', 'q', 'Con chi hai fatto il cambio? · ' + place));
-  const matched = docsFor(wiz.campo, wiz.ruolo);
-  if (!matched.length) {
-    body.append(el('p', 'none', 'Non hai caricato il PDF di ' + place + '. Caricalo e riprova.'));
-    return;
-  }
-  let shown = 0;
-  matched.forEach(({ d, c }) => {
-    const ops = P.dayOperators(d, s.date).filter((o) => !P.nameMatches(o.name, name));
-    if (!ops.length) return;
-    shown += ops.length;
-    if (matched.length > 1) body.append(el('p', 'grp', labelOf(c)));
-    ops.forEach((o) => {
-      const t = decorate({ ...o, src: d.id });
-      const sub = t.type.label + (o.note ? ' · ' + o.note : '');
-      body.append(opt(o.name, sub, () => commit({
-        swap: o.name, start: o.start, end: o.end, kindStart: o.kindStart, label: o.label,
-        note: o.note, extended: o.extended, mates: o.mates, zone: d.title, src: d.id,
-      }, 'Turno aggiornato'), '', o.start + ' – ' + o.end));
-    });
+  // 3) con chi hai fatto il cambio
+  const d = docById(wiz.docId);
+  const single = docsOfCat(wiz.cat).length === 1;
+  body.append(backBtn(single ? 1 : 2), el('p', 'q', 'Con chi hai fatto il cambio? · ' + (d ? docInfo(d).label : '')));
+  if (!d) { body.append(el('p', 'none', 'Postazione non più presente nei turni pubblicati.')); return; }
+  const ops = P.dayOperators(d, s.date).filter((o) => !P.nameMatches(o.name, name));
+  ops.forEach((o) => {
+    const t = decorate({ ...o, src: d.id });
+    const sub = t.type.label + (o.note ? ' · ' + o.note : '');
+    body.append(opt(o.name, sub, () => commit({
+      swap: o.name, start: o.start, end: o.end, kindStart: o.kindStart, label: o.label,
+      note: o.note, extended: o.extended, mates: o.mates, zone: d.title, src: d.id,
+    }, 'Turno aggiornato'), '', o.start + ' – ' + o.end));
   });
-  if (!shown) body.append(el('p', 'none', 'Nessun operatore in questo giorno nel PDF.'));
+  if (!ops.length) body.append(el('p', 'none', 'Nessun operatore in questo giorno in questa postazione.'));
 }
 
 function renderMates() {
@@ -504,22 +514,22 @@ function renderMates() {
   $('#shSub').textContent = fmtLong(s.day) + ' · ' + s.start + ' – ' + s.end + (s.role ? ' · ' + s.role : '');
   $('#shSteps').replaceChildren();
   body.replaceChildren();
-  const campo = infoOf(s.zone, s.src).campo;
+  const cat = docInfo(docById(s.src)).cat;
   const prev = new Date(s.day.getFullYear(), s.day.getMonth(), s.day.getDate() - 1);
   const together = [], others = [], seen = new Set();
   docs.forEach((d) => {
-    const c = infoOf(d.title, d.id);
-    if (!campo || c.campo !== campo) return;
+    const info = docInfo(d);
+    if (!cat || info.cat !== cat) return;
     [[iso(prev), true], [s.date, false]].forEach(([date, isPrev]) => {
       P.dayOperators(d, date).forEach((o) => {
         if (P.nameMatches(o.name, name)) return;
         const t = decorate({ ...o, date, src: d.id, zone: d.title });
         const ov = t.startAt < s.endAt && t.endAt > s.startAt;
         if (isPrev && !ov) return;
-        const k = o.name + '|' + labelOf(c) + '|' + date + '|' + o.start;
+        const k = o.name + '|' + info.post + '|' + date + '|' + o.start;
         if (seen.has(k)) return;
         seen.add(k);
-        (ov ? together : others).push({ name: o.name, role: labelOf(c), time: o.start + ' – ' + o.end, at: t.startAt });
+        (ov ? together : others).push({ name: o.name, role: info.short, time: o.start + ' – ' + o.end, at: t.startAt });
       });
     });
   });
@@ -535,17 +545,20 @@ function renderMates() {
       body.append(row);
     });
   };
-  add('Con te', together);
+  add('Con te · ' + niceCase(cat), together);
   add('Altri turni del giorno', others);
   if (!together.length && !others.length) {
-    body.append(el('p', 'none', campo ? 'Nei PDF caricati non trovo altri operatori in questo giorno.' : 'Non so a quale campo appartiene questo turno.'));
+    body.append(el('p', 'none', cat ? 'Nei turni pubblicati non trovo altri operatori in questo giorno.' : 'Non so a quale postazione appartiene questo turno.'));
   }
 }
 
+/* ---------- Notifiche push: promemoria (turni-push) e turni pubblicati (turni-sync) ---------- */
 const PUSH_URL = String(window.TURNI_PUSH || '').replace(/\/$/, '');
+const API_URL = String(window.TURNI_API || '').replace(/\/$/, '');
 const pushOK = !!PUSH_URL && 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
-const LS_PUSH = 'turni.push.v1', LS_PUSHSIG = 'turni.push.sig';
+const LS_PUSH = 'turni.push.v1', LS_PUSHSIG = 'turni.push.sig', LS_UPD = 'turni.updates.v1';
 let pushOn = store.get(LS_PUSH, false), pushTimer = 0, pushBusy = false;
+let updOn = store.get(LS_UPD, true); // avviso quando il responsabile pubblica nuovi turni
 const keyBytes = (s) => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0));
 async function pushPost(path, body) {
   const r = await fetch(PUSH_URL + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
@@ -579,7 +592,7 @@ async function syncPush(force) {
     if (!force && sig === store.get(LS_PUSHSIG, '')) return;
     await pushPost('/api/sync', { sub: sub.toJSON(), notifs });
     store.set(LS_PUSHSIG, sig);
-  } catch { /* offline */ }
+  } catch { /* offline: riprovo al prossimo aggiornamento */ }
   finally { pushBusy = false; }
 }
 function schedulePush() { if (pushOK && pushOn) { clearTimeout(pushTimer); pushTimer = setTimeout(() => syncPush(false), 1500); } }
@@ -593,9 +606,10 @@ async function enablePush() {
   if (old) await old.unsubscribe();
   const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: keyBytes(key) });
   pushOn = true; store.set(LS_PUSH, true);
-  await pushPost('/api/sync', { sub: sub.toJSON(), notifs: pushNotifs() });
-  store.set(LS_PUSHSIG, JSON.stringify(pushNotifs()));
-  enableUpdates();
+  const notifs = pushNotifs();
+  await pushPost('/api/sync', { sub: sub.toJSON(), notifs });
+  store.set(LS_PUSHSIG, JSON.stringify(notifs));
+  if (updOn) enableUpdates();
   return true;
 }
 async function disablePush() {
@@ -621,14 +635,14 @@ function icsFold(line) {
   }
   return parts.join('\r\n ');
 }
-const icsDate = (d) => d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0') + 'T' + String(d.getHours()).padStart(2, '0') + String(d.getMinutes()).padStart(2, '0') + '00';
-function remindShifts() { const now = new Date(); return allShifts().filter((s) => !s.rest && s.endAt >= now); }
+const icsDate = (d) => d.getFullYear() + pad2(d.getMonth() + 1) + pad2(d.getDate()) + 'T' + pad2(d.getHours()) + pad2(d.getMinutes()) + '00';
+function remindShifts() { const now = new Date(); return allShifts().filter((s) => !s.rest && !s.pending && s.endAt >= now); }
 function buildIcs(list, o) {
   const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+/, '');
   const L = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//La Falco//Turni//IT', 'CALSCALE:GREGORIAN', 'METHOD:PUBLISH', 'X-WR-CALNAME:Turni La Falco'];
   list.forEach((s) => {
     const desc = [s.role, s.note, s.mates && s.mates.length ? 'Cambio: ' + s.mates.join(', ') : 'Cambio da definire'].filter(Boolean).join(' - ');
-    L.push('BEGIN:VEVENT', 'UID:turno-' + s.date + '@turni-lafalco', 'DTSTAMP:' + stamp,
+    L.push('BEGIN:VEVENT', 'UID:turno-' + s.date + '-' + s.start.replace(':', '') + '@turni-lafalco', 'DTSTAMP:' + stamp,
       'DTSTART:' + icsDate(s.startAt), 'DTEND:' + icsDate(s.endAt),
       'SUMMARY:' + icsEsc('Turno ' + s.start + '-' + s.end + (s.role ? ' · ' + s.role : '')),
       'DESCRIPTION:' + icsEsc(desc), 'TRANSP:OPAQUE');
@@ -656,20 +670,31 @@ async function deliverIcs(text) {
   setTimeout(() => URL.revokeObjectURL(url), 4000);
   return 'download';
 }
+function switchOpt(title, sub, on, onToggle) {
+  const b = opt(title, sub, onToggle, 'tg' + (on ? ' on' : ''), on ? '✓' : '');
+  b.setAttribute('role', 'switch');
+  b.setAttribute('aria-checked', String(!!on));
+  return b;
+}
 function renderRemind() {
   const body = $('#shBody');
-  $('#shTitle').textContent = 'Promemoria turni';
+  $('#shTitle').textContent = 'Promemoria e avvisi';
   $('#shSub').textContent = 'Un avviso sul telefono prima di ogni turno';
   $('#shSteps').replaceChildren();
   body.replaceChildren();
   const list = remindShifts();
   body.append(el('p', 'q', 'Quando vuoi essere avvisato?'));
   [['eve', 'La sera prima', 'Alle 20:00 del giorno prima'], ['hour', 'Un\'ora prima', 'Un\'ora prima dell\'inizio del turno']].forEach(([k, t, sub]) => {
-    const b = opt(t, sub, () => { rem[k] = !rem[k]; store.set(LS_REM, rem); schedulePush(); renderRemind(); }, 'tg' + (rem[k] ? ' on' : ''), rem[k] ? '✓' : '');
-    b.setAttribute('role', 'switch');
-    b.setAttribute('aria-checked', String(!!rem[k]));
-    body.append(b);
+    body.append(switchOpt(t, sub, rem[k], () => { rem[k] = !rem[k]; store.set(LS_REM, rem); schedulePush(); renderRemind(); }));
   });
+  if (pushOK && API_URL) {
+    body.append(switchOpt('Turni pubblicati', 'Quando il responsabile pubblica o cambia i turni', updOn, async () => {
+      updOn = !updOn;
+      store.set(LS_UPD, updOn);
+      if (pushOn) { if (updOn) await enableUpdates(); else await disableUpdates(); }
+      renderRemind();
+    }));
+  }
   if (!pushOK) body.append(el('p', 'none', list.length ? 'Verranno aggiunti ' + list.length + (list.length === 1 ? ' turno' : ' turni') + ' da oggi in poi.' : 'Non ci sono turni in programma.'));
   if (pushOK) {
     body.append(el('p', 'q', 'Notifiche push'));
@@ -691,7 +716,7 @@ function renderRemind() {
     } else {
       const on = el('button', 'big', 'Attiva le notifiche');
       on.type = 'button';
-      on.disabled = !rem.eve && !rem.hour;
+      on.disabled = !rem.eve && !rem.hour && !updOn;
       on.addEventListener('click', async () => {
         on.disabled = true; on.textContent = 'Attivazione…';
         try { if (await enablePush()) toast('Notifiche attivate'); }
@@ -700,9 +725,9 @@ function renderRemind() {
       });
       body.append(on);
     }
-    body.append(el('p', 'fine', 'Per inviare gli avvisi, giorni, orari e ruolo dei tuoi turni vengono salvati sul server delle notifiche. Se disattivi, vengono cancellati.'));
+    body.append(el('p', 'fine', 'Per inviare i promemoria, giorni, orari e postazione dei tuoi turni vengono salvati sul server delle notifiche. Se disattivi, vengono cancellati.'));
+    return;
   }
-  if (pushOK) return;
   body.append(el('p', 'q', 'Calendario'));
   const go = el('button', 'big', 'Aggiungi al calendario');
   go.type = 'button';
@@ -713,138 +738,33 @@ function renderRemind() {
     closeSheet();
     toast(r === 'shared' ? 'Scegli "Calendario" per aggiungerli' : 'File calendario pronto: aprilo per aggiungerli');
   });
-  body.append(go, el('p', 'fine', 'Funziona con il calendario del telefono, su iPhone e Android, anche con l\'app chiusa. Se carichi nuovi PDF o cambi un turno, ripeti: i giorni già inseriti vengono aggiornati.'));
+  body.append(go, el('p', 'fine', 'Funziona con il calendario del telefono, su iPhone e Android, anche con l\'app chiusa. Se il responsabile cambia i turni, ripeti: i giorni già inseriti vengono aggiornati.'));
 }
 $('#remBtn').addEventListener('click', (e) => openSheet(null, e.currentTarget, 'remind'));
 
-const fail = (code, msg) => Object.assign(new Error(msg || code), { code });
-const readBytes = (file) => new Promise((res, rej) => {
-  const r = new FileReader();
-  r.onload = () => res(r.result);
-  r.onerror = () => rej(r.error || new Error('FileReader'));
-  r.readAsArrayBuffer(file);
-});
-const ICLOUD = 'Il file è su iCloud e non è stato ancora scaricato completamente sul telefono. Aprilo prima nell\'app File per scaricarlo.';
-async function readPdf(file) {
-  if (file.size === 0) throw fail('icloud', ICLOUD);
-  let buf;
-  try { buf = await readBytes(file).catch(() => file.arrayBuffer()); }
-  catch { throw fail('icloud', 'Il telefono non mi ha dato il contenuto del file. Aprilo una volta nell\'app File e riprova.'); }
-  const data = new Uint8Array(buf);
-  if (!data.length) throw fail('icloud', ICLOUD);
-  let head = '';
-  for (let i = 0; i < Math.min(data.length, 1024); i++) head += String.fromCharCode(data[i]);
-  if (!head.includes('%PDF-')) throw Object.assign(fail('open'), { detail: 'copia incompleta sul telefono: manca l\'intestazione %PDF' });
-  const detail = (e) => String((e && (e.name + ': ' + e.message)) || e).slice(0, 110);
-  const opts = () => ({ data: data.slice(), isEvalSupported: false, disableFontFace: true });
-  let pdf;
-  try { pdf = await pdfjsLib.getDocument(opts()).promise; }
-  catch (e) {
-    if (e && e.name === 'PasswordException') throw fail('locked');
-    try { pdf = await pdfjsLib.getDocument(opts()).promise; }
-    catch (e2) { throw Object.assign(fail('open'), { detail: detail(e2) }); }
-  }
-  const pages = [];
-  let items = 0, pageNo = 0;
-  try {
-    for (let p = 1; p <= pdf.numPages; p++) {
-      pageNo = p;
-      const page = await pdf.getPage(p);
-      const vp = page.getViewport({ scale: 1 });
-      const tc = await page.getTextContent();
-      const its = tc.items.filter((i) => 'str' in i && i.str.trim());
-      items += its.length;
-      pages.push(its.map((i) => ({ str: i.str, x: i.transform[4], y: vp.height - i.transform[5], w: i.width })));
-      page.cleanup();
-    }
-  } catch (e) {
-    throw Object.assign(fail('open'), { detail: 'pagina ' + pageNo + ': ' + String((e && e.message) || e).slice(0, 80) });
-  } finally { try { pdf.destroy(); } catch { /* ignore */ } }
-  if (!items) throw fail('scan');
-  let doc;
-  try { doc = P.parseDocument(pages); } catch { throw fail('format'); }
-  doc.warn = checkDoc(doc);
-  return doc;
-}
-
-function checkDoc(doc) {
-  const days = [...new Set(doc.rows.map((r) => r.date))].sort();
-  const warns = [];
-  if (days.length < doc.rows.length) warns.push('alcuni giorni compaiono due volte');
-  let missing = 0;
-  for (let i = 1; i < days.length; i++) {
-    const gap = Math.round((dateOf(days[i]) - dateOf(days[i - 1])) / 864e5) - 1;
-    if (gap > 0) missing += gap;
-  }
-  if (missing) warns.push((missing === 1 ? 'manca 1 giorno' : 'mancano ' + missing + ' giorni') + ' nella tabella');
-  if (!doc.rows.some((r) => r.cells.some((c) => c))) warns.push('la tabella sembra vuota (turni non ancora scritti?)');
-  return warns.length ? 'Controlla: ' + warns.join(', ') : '';
-}
-const FAIL_TXT = {
-  scan: 'sembra una scansione o una foto: non contiene testo. Serve il PDF originale.',
-  format: 'formato non riconosciuto: non trovo la tabella con i giorni e gli orari.',
-  locked: 'è protetto da password.',
-  open: 'non riesco ad aprirlo (file danneggiato?).',
-  icloud: 'il file è su iCloud e non è stato scaricato. Aprilo prima nell\'app File.',
-};
-
-function setMsg(text, cls) {
-  const m = $('#msg');
-  m.textContent = text;
-  m.className = 'msg ' + (cls || '');
-}
-
-async function handleFiles(files) {
-  const list = [...files].filter((f) => /\.pdf$/i.test(f.name) || f.type === 'application/pdf');
-  if (!list.length) { setMsg('Seleziona un file PDF.', 'err'); return; }
-  setMsg('Lettura in corso…', '');
-  const problems = [], warns = [];
-  let added = 0, found = 0;
-  for (const f of list) {
-    try {
-      const doc = await readPdf(f);
-      doc.id = f.name;
-      docs = docs.filter((d) => d.id !== doc.id).concat(doc);
-      added++;
-      found += P.findShifts(doc, name).length;
-      if (doc.warn) warns.push('"' + f.name + '": ' + doc.warn.replace('Controlla: ', ''));
-    } catch (e) {
-      const errReason = e && e.code === 'icloud' ? e.message : (FAIL_TXT[e && e.code] || FAIL_TXT.open);
-      problems.push('"' + f.name + '" non aggiunto: ' + errReason + (e && e.code === 'open' && e.detail ? ' [' + e.detail + ']' : ''));
-    }
-  }
-  store.set(LS_DOCS, docs.filter((x) => !x.remote));
-  render();
-  if (added) endGuide(true);
-  const lines = [...problems];
-  if (added && !found) lines.push('PDF letto, ma non ho trovato "' + name + '". Controlla come è scritto il tuo nome qui sotto.');
-  warns.forEach((w) => lines.push('Attenzione, ' + w + '.'));
-  if (lines.length) setMsg(lines.join('\n'), 'err');
-  else setMsg('Aggiunti ' + found + (found === 1 ? ' turno' : ' turni') + '.', 'ok');
-}
-
-$('#file').addEventListener('change', (e) => { handleFiles(e.target.files); e.target.value = ''; });
-const drop = $('#drop');
-['dragenter', 'dragover'].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.add('over'); }));
-['dragleave', 'drop'].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.remove('over'); }));
-drop.addEventListener('drop', (e) => handleFiles(e.dataTransfer.files));
-window.addEventListener('dragover', (e) => e.preventDefault());
-window.addEventListener('drop', (e) => e.preventDefault());
-
-$('#nameForm').addEventListener('submit', (e) => {
-  e.preventDefault();
-  const v = $('#nameInput').value.trim().toUpperCase();
-  if (!v) return;
+/* ---------- Nome ---------- */
+function setName(v) {
   name = v;
   store.set(LS_NAME, name);
-  setMsg('', '');
   render();
+}
+$('#nameForm').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const v = normName($('#nameInput').value);
+  if (!v) return;
+  $('#nameInput').blur();
+  setName(v);
+  const n = allShifts().filter((s) => !s.rest).length;
+  toast(n ? 'Trovati ' + n + (n === 1 ? ' turno' : ' turni') + ' per ' + v : 'Nessun turno per ' + v + ' nei turni pubblicati');
 });
+$('#refreshBtn').addEventListener('click', () => pullSchedule(true));
 
 function setView(v) {
   view = v;
   $('#tabNext').classList.toggle('on', v === 'next');
   $('#tabAll').classList.toggle('on', v === 'all');
+  $('#tabNext').setAttribute('aria-selected', String(v === 'next'));
+  $('#tabAll').setAttribute('aria-selected', String(v === 'all'));
   render();
 }
 $('#tabNext').addEventListener('click', () => setView('next'));
@@ -856,6 +776,7 @@ $('#shClose').addEventListener('click', closeSheet);
 $('#shBg').addEventListener('click', closeSheet);
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeSheet(); });
 
+/* ---------- Installazione e benvenuto ---------- */
 const UA = navigator.userAgent;
 const isStandalone = ['standalone', 'fullscreen', 'minimal-ui'].some((m) => matchMedia('(display-mode: ' + m + ')').matches) || navigator.standalone === true;
 const isIOS = /iPhone|iPad|iPod/i.test(UA) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
@@ -876,7 +797,7 @@ function gateSteps(items) {
     row.style.setProperty('--d', (n * 0.12) + 's');
     const num = el('i', '', String(n + 1));
     const t = el('span');
-    t.innerHTML = it;
+    t.innerHTML = it; // testi fissi dell'app, nessun dato dell'utente
     row.append(num, t);
     box.append(row);
   });
@@ -900,7 +821,7 @@ function showGate() {
   $('#gate').hidden = false;
   $('#welcome').hidden = true;
   const btn = $('#gateBtn'), note = $('#gateNote');
-  let mode = isIOS ? (isSafariIOS ? 'ios-safari' : 'ios-other') : 'auto';
+  const mode = isIOS ? (isSafariIOS ? 'ios-safari' : 'ios-other') : 'auto';
   if (mode === 'ios-other') {
     btn.textContent = 'Apri con Safari';
     $('#gateLead').textContent = "Per scaricare l'app devi aprire questo link con Safari.";
@@ -943,6 +864,7 @@ async function startWelcome() {
   w.hidden = false;
   setStep(0);
   $('#welName').value = name || '';
+  fillNameList();
   await wait(2000);
   setStep(1);
   setTimeout(() => { try { $('#welName').focus({ preventScroll: true }); } catch { /* ignore */ } }, 650);
@@ -950,7 +872,7 @@ async function startWelcome() {
 $('#welForm').addEventListener('submit', async (e) => {
   e.preventDefault();
   const inp = $('#welName');
-  const v = inp.value.trim().toUpperCase().replace(/\s+/g, ' ');
+  const v = normName(inp.value);
   if (!v) { inp.classList.remove('bad'); void inp.offsetWidth; inp.classList.add('bad'); return; }
   inp.blur();
   name = v;
@@ -972,37 +894,12 @@ function enterMain(animate) {
   if (animate) { document.body.classList.add('enter'); setTimeout(() => document.body.classList.remove('enter'), 900); }
   $('#gate').hidden = true;
   render();
-  if (!docs.length && !store.get(LS_GUIDE, false)) setTimeout(startGuide, animate ? 900 : 400);
 }
-function placeTip() {
-  const drop = $('#drop'), tip = $('#coachTip');
-  if (!drop || $('#coach').hidden) return;
-  const r = drop.getBoundingClientRect();
-  const h = tip.offsetHeight;
-  let top = r.top - h - 22;
-  if (top < 8) top = Math.min(r.bottom + 22, innerHeight - h - 8);
-  tip.style.top = top + 'px';
-}
-function startGuide() {
-  if (docs.length) return;
-  document.body.classList.add('guiding');
-  $('#coach').hidden = false;
-  $('#drop').scrollIntoView({ block: 'center', behavior: 'smooth' });
-  setTimeout(placeTip, 50);
-  setTimeout(placeTip, 450);
-}
-function endGuide(done) {
-  if (done) store.set(LS_GUIDE, true);
-  document.body.classList.remove('guiding');
-  $('#coach').hidden = true;
-}
-$('#coachSkip').addEventListener('click', () => endGuide(true));
-window.addEventListener('resize', placeTip);
-window.addEventListener('scroll', placeTip, { passive: true });
 
+/* ---------- Aggiornamento dell'app ---------- */
 async function siteSig() {
   let h = 2166136261;
-  for (const f of ['index.html', 'app.js', 'parser.js', 'style.css', 'sw.js', 'config.js']) {
+  for (const f of ['index.html', 'app.js', 'shifts.js', 'style.css', 'sw.js', 'config.js']) {
     const r = await fetch(f, { cache: 'no-store' });
     if (!r.ok) throw new Error('x');
     const t = await r.text();
@@ -1026,27 +923,37 @@ $('#updBtn').addEventListener('click', async () => {
   try { const regs = await navigator.serviceWorker.getRegistrations(); await Promise.all(regs.map((r) => r.update())); } catch { /* ignore */ }
   location.reload();
 });
-document.addEventListener('visibilitychange', checkUpdate);
 
 /* ---------- Turni pubblicati dal responsabile ---------- */
-const API_URL = String(window.TURNI_API || '').replace(/\/$/, '');
-async function pullSchedule() {
-  if (!API_URL) return;
+let pulling = false;
+async function pullSchedule(manual) {
+  if (!API_URL) { if (manual) toast('Server dei turni non configurato'); return; }
+  if (pulling) return;
+  pulling = true;
   try {
     const r = await fetch(API_URL + '/api/schedule', { cache: 'no-store' });
-    if (!r.ok) return;
+    if (!r.ok) throw new Error('server ' + r.status);
     const d = await r.json();
+    store.set(LS_RCHK, Date.now());
     const prev = store.get(LS_RVER, null);
-    if (prev !== null && String(d.version) === String(prev)) return;
-    const remote = (d.docs || []).map((x) => ({ ...x, remote: true }));
+    if (prev !== null && String(d.version) === String(prev)) {
+      if (manual) toast('I turni sono già aggiornati');
+      renderSource();
+      return;
+    }
+    const remote = (Array.isArray(d.docs) ? d.docs : []).filter((x) => x && Array.isArray(x.rows) && Array.isArray(x.cols)).map((x) => ({ ...x, remote: true }));
     store.set(LS_REMOTE, remote);
     store.set(LS_RVER, d.version);
-    docs = docs.filter((x) => !x.remote).concat(remote);
+    docs = remote;
     render();
     if (prev !== null) toast('Turni aggiornati dal responsabile');
-  } catch { /* offline: restano gli ultimi ricevuti */ }
+  } catch {
+    if (manual) toast('Server dei turni non raggiungibile: restano gli ultimi ricevuti');
+  } finally {
+    pulling = false;
+  }
 }
-/* Avviso push "turni pubblicati": registrazione separata, con la sua chiave */
+/* Avviso push "turni pubblicati": registrazione separata (ambito notify/), con la chiave di turni-sync */
 const NOTIFY_SCOPE = 'notify/';
 async function notifyReg() {
   let reg = await navigator.serviceWorker.getRegistration(NOTIFY_SCOPE);
@@ -1058,7 +965,7 @@ async function notifyReg() {
   return reg;
 }
 async function enableUpdates() {
-  if (!API_URL || !('PushManager' in window) || Notification.permission !== 'granted') return false;
+  if (!API_URL || !('PushManager' in window) || !('Notification' in window) || Notification.permission !== 'granted') return false;
   try {
     const reg = await notifyReg();
     let sub = await reg.pushManager.getSubscription();
@@ -1078,17 +985,20 @@ async function disableUpdates() {
     if (sub) { await fetch(API_URL + '/api/unsub', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ endpoint: sub.endpoint }) }).catch(() => {}); await sub.unsubscribe(); }
   } catch { /* ignore */ }
 }
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') pullSchedule(); });
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible') return;
+  pullSchedule();
+  checkUpdate();
+  if (document.body.classList.contains('mode-app')) render(); // passata la mezzanotte, "oggi" e "prossimo turno" si aggiornano
+});
 setInterval(() => { if (document.visibilityState === 'visible') pullSchedule(); }, 5 * 60 * 1000);
-window.addEventListener('online', pullSchedule);
-pullSchedule();
-if (pushOn) enableUpdates();
-window.addEventListener('online', checkUpdate);
+window.addEventListener('online', () => { pullSchedule(); checkUpdate(); });
 setInterval(checkUpdate, 3 * 60 * 1000);
 setTimeout(checkUpdate, 2500);
 
 function boot() {
-  const onboarded = store.get(LS_ONB, false) || !!store.get(LS_NAME, '') || docs.length > 0;
+  const onboarded = store.get(LS_ONB, false) || !!store.get(LS_NAME, '');
   if (!isStandalone) { showGate(); return; }
   if (!onboarded) { startWelcome(); return; }
   enterMain(false);
@@ -1098,4 +1008,6 @@ if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => { navigator.serviceWorker.register('sw.js').catch(() => {}); });
 }
 
+pullSchedule();
+if (pushOn && updOn) enableUpdates();
 boot();

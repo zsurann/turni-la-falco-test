@@ -1,11 +1,11 @@
 /* Service worker: prima la rete (così gli aggiornamenti del sito arrivano subito),
-   se sei offline usa la copia salvata. */
+   se sei offline usa la copia salvata.
+   IMPORTANTE: a ogni rilascio aumenta il numero in CACHE, così le app installate si aggiornano. */
 try { importScripts('config.js'); } catch (e) { /* senza notifiche push */ }
-const CACHE = 'turni-test-v1';
+const CACHE = 'turni-test-v2';
 const ASSETS = [
-  './', 'index.html', 'style.css', 'app.js', 'parser.js', 'manifest.webmanifest',
-  'logo.png', 'favicon.png', 'icon-192.png', 'icon-512.png',
-  'polyfill.js', 'pdf.min.mjs', 'pdf.worker.min.mjs', 'config.js',
+  './', 'index.html', 'style.css', 'app.js', 'shifts.js', 'manifest.webmanifest',
+  'logo.png', 'favicon.png', 'icon-192.png', 'icon-512.png', 'icon-maskable-512.png', 'config.js',
 ];
 
 self.addEventListener('install', (e) => {
@@ -29,7 +29,12 @@ self.addEventListener('fetch', (e) => {
         if (res.ok) { const copy = res.clone(); caches.open(CACHE).then((c) => c.put(req, copy)); }
         return res;
       })
-      .catch(() => caches.match(req).then((r) => r || caches.match('index.html')))
+      .catch(() => caches.match(req, { ignoreSearch: req.mode === 'navigate' }).then((r) => {
+        if (r) return r;
+        // la pagina di riserva solo per le navigazioni, non per immagini o script mancanti
+        if (req.mode === 'navigate') return caches.match('index.html');
+        return Response.error();
+      }))
   );
 });
 

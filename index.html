@@ -49,7 +49,7 @@
           </div>
         </div>
       </div>
-          <button id="remBtn" class="rembtn" type="button">
+      <button id="remBtn" class="rembtn" type="button">
         <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M6 8a6 6 0 0 1 12 0c0 7 3 8 3 8H3s3-1 3-8M10.3 20a1.9 1.9 0 0 0 3.4 0"/></svg>
         <span>Promemoria turni</span>
       </button>
@@ -59,8 +59,8 @@
       <div class="bar">
         <h2>I tuoi turni</h2>
         <div class="seg" role="tablist">
-          <button id="tabNext" class="on" role="tab">Prossimi</button>
-          <button id="tabAll" role="tab">Tutti</button>
+          <button id="tabNext" class="on" type="button" role="tab" aria-selected="true">Prossimi</button>
+          <button id="tabAll" type="button" role="tab" aria-selected="false">Tutti</button>
         </div>
       </div>
       <div id="list"></div>
@@ -68,25 +68,22 @@
 
     <section id="empty" class="empty" hidden></section>
 
-    <section class="card upload">
-      <h2>Aggiungi i PDF dei turni</h2>
-      <label id="drop" class="drop" for="file">
-        <svg viewBox="0 0 24 24" width="28" height="28" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 16V4m0 0L7 9m5-5 5 5M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></svg>
-        <span><b>Scegli un PDF</b> o trascinalo qui</span>
-        <input id="file" type="file" accept="application/pdf,.pdf" multiple hidden>
-      </label>
-      <p id="msg" class="msg" role="status"></p>
-
-      <ul id="docs" class="docs"></ul>
-
-      <form id="nameForm" class="nameform">
-        <label for="nameInput">Il tuo nome nei PDF</label>
+    <section class="card source" aria-labelledby="srcTitle">
+      <div class="src-head">
+        <div>
+          <h2 id="srcTitle">Turni dal responsabile</h2>
+          <p id="source" class="src-info"></p>
+        </div>
+        <button id="refreshBtn" class="src-btn" type="button">Aggiorna ora</button>
+      </div>
+      <form id="nameForm" class="nameform" autocomplete="off">
+        <label for="nameInput">Il tuo nome nei turni</label>
         <div class="row">
-          <input id="nameInput" type="text" autocomplete="off" spellcheck="false">
+          <input id="nameInput" type="text" list="nameList" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="COGNOME N.">
           <button type="submit">Salva</button>
         </div>
       </form>
-      <p class="hint">I PDF vengono letti direttamente sul tuo dispositivo e non vengono caricati da nessuna parte.</p>
+      <p class="hint">Scegli il tuo nome dall'elenco, scritto come lo scrive il responsabile. I turni si aggiornano da soli quando vengono pubblicati.</p>
     </section>
   </main>
 
@@ -114,11 +111,11 @@
   <div id="gate" class="screen gate" hidden>
     <div class="scr-top"><div class="plate"><img src="logo.png" alt="La Falco soc. coop."></div></div>
     <div class="scr-body">
-      <h1 class="rise" style="--d:.15s">Benvenuti in<br>Turni La Falco</h1>
-      <p class="lead rise" style="--d:.3s" id="gateLead">I tuoi turni sempre con te. Per iniziare, scarica l'app sul tuo telefono.</p>
+      <h1 class="rise d1">Benvenuti in<br>Turni La Falco</h1>
+      <p class="lead rise d2" id="gateLead">I tuoi turni sempre con te. Per iniziare, scarica l'app sul tuo telefono.</p>
       <div id="gateSteps" class="gsteps" hidden></div>
-      <button id="gateBtn" class="big rise" style="--d:.45s" type="button">Scarica l'app</button>
-      <p class="fine rise" style="--d:.6s" id="gateNote">Se l'hai già installata, aprila dalla schermata Home.</p>
+      <button id="gateBtn" class="big rise d3" type="button">Scarica l'app</button>
+      <p class="fine rise d4" id="gateNote">Se l'hai già installata, aprila dalla schermata Home.</p>
     </div>
   </div>
 
@@ -130,30 +127,23 @@
         <p class="lead">Prepariamo la tua app in un attimo.</p>
       </div>
       <form class="pane p1" id="welForm" autocomplete="off">
-        <h1 class="sm">Come ti chiami<br>nei PDF?</h1>
-        <p class="lead">Scrivilo come appare sui turni, ad esempio <b>GENNARO C.</b></p>
-        <input id="welName" type="text" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="COGNOME N." aria-label="Il tuo nome nei PDF">
+        <h1 class="sm">Come ti chiami<br>nei turni?</h1>
+        <p class="lead">Sceglilo dall'elenco o scrivilo come appare sui turni, ad esempio <b>GENNARO C.</b></p>
+        <input id="welName" type="text" list="nameList" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="COGNOME N." aria-label="Il tuo nome nei turni">
         <button class="big" type="submit">Continua</button>
       </form>
       <div class="pane p2">
         <svg class="check" viewBox="0 0 52 52" aria-hidden="true"><circle cx="26" cy="26" r="24"/><path d="M15 27l8 8 15-17"/></svg>
         <h1 class="sm">Tutto pronto,<br><span id="welHi"></span></h1>
-        <p class="lead">Nome salvato. Ora aggiungiamo i tuoi turni.</p>
+        <p class="lead">Nome salvato. I tuoi turni arrivano direttamente dal responsabile.</p>
       </div>
     </div>
   </div>
 
-  <div id="coach" class="coach" hidden>
-    <div class="coach-dim"></div>
-    <div class="tip" id="coachTip" role="dialog" aria-label="Guida">
-      <b>Aggiungi il tuo primo PDF</b>
-      <span>Tocca qui e scegli il PDF dei turni: l'app trova i tuoi giorni da sola. Puoi aggiungerne quanti ne vuoi.</span>
-      <button id="coachSkip" class="skip" type="button">Salta</button>
-    </div>
-  </div>
+  <datalist id="nameList"></datalist>
 
   <script src="config.js"></script>
-  <script src="parser.js"></script>
+  <script src="shifts.js"></script>
   <script type="module" src="app.js"></script>
 </body>
 </html>
