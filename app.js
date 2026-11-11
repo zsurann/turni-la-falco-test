@@ -6,6 +6,7 @@ const P = window.TurniShifts;
 const LS_NAME = 'turni.name.v1';
 const LS_OV = 'turni.overrides.v1';
 const LS_ONB = 'turni.onboarded.v1';
+const LS_REVEAL = 'turni.reveal.v1'; // schermata "Bentornato" del nuovo design già vista
 const LS_REMOTE = 'turni.remote.v1', LS_RVER = 'turni.remote.ver', LS_RCHK = 'turni.remote.checked';
 
 const MESI = ['Gennaio', 'Febbraio', 'Marzo', 'Aprile', 'Maggio', 'Giugno', 'Luglio', 'Agosto', 'Settembre', 'Ottobre', 'Novembre', 'Dicembre'];
@@ -40,6 +41,23 @@ const fmtH = (h) => (Number.isInteger(h) ? h : h.toFixed(1).replace('.', ',')) +
 const pad2 = (n) => String(n).padStart(2, '0');
 const hhmm = (d) => pad2(d.getHours()) + ':' + pad2(d.getMinutes());
 const normName = (s) => String(s || '').trim().toUpperCase().replace(/\s+/g, ' ');
+const reduceMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+// Iniziali per l'avatar: "GENNARO C." -> "GC"
+function initials(n) {
+  const w = String(n || '').replace(/[^A-Za-zÀ-ÿ\s]/g, ' ').trim().split(/\s+/).filter(Boolean);
+  return w.length ? (w[0][0] + (w.length > 1 ? w[w.length - 1][0] : (w[0][1] || ''))).toUpperCase() : '';
+}
+// Numero che conta da 0 al valore
+function countUp(node, to, fmt) {
+  if (reduceMotion() || !to) { node.textContent = fmt(to); return; }
+  const t0 = performance.now() + 150, dur = 1000;
+  const f = (t) => {
+    const k = Math.max(0, Math.min(1, (t - t0) / dur)), e = 1 - Math.pow(1 - k, 4);
+    node.textContent = k < 1 ? fmt(Math.round(to * e)) : fmt(to);
+    if (k < 1 && node.isConnected) requestAnimationFrame(f);
+  };
+  requestAnimationFrame(f);
+}
 
 /* ---------- Postazioni e categorie (come nell'app del responsabile) ---------- */
 // Ogni documento pubblicato porta la categoria (CAMPO SUD, CAMPO NORD, PARCHI, ...) e il nome
@@ -171,6 +189,10 @@ function relLabel(s, now) {
 function render() {
   invalidate();
   $('#whoName').textContent = name;
+  $('#whoAv').textContent = initials(name);
+  const hr = new Date().getHours();
+  $('#hello').textContent = (hr < 5 ? 'Buonanotte' : hr < 13 ? 'Buongiorno' : hr < 18 ? 'Buon pomeriggio' : 'Buonasera') + (name ? ', ' + name : '');
+  $('#remBtnTxt').textContent = pushOn ? 'Notifiche attive' : 'Avvisi turni';
   if (document.activeElement !== $('#nameInput')) $('#nameInput').value = name;
 
   const now = new Date();
@@ -200,9 +222,98 @@ function render() {
   $('#shiftsSection').hidden = !shifts.length;
 }
 
+/* ---------- Scena animata della postazione ----------
+   Dove si trova l'operatore, in base a categoria, postazione e ora (come nell'app principale):
+   - Campo Sud, Ronda: control room fino alle 19:00, poi in auto
+   - Campo Sud, Gabbiotto: controllo ingressi fino alle 19:00, poi control room
+   - Campo Sud Rom: sempre in auto
+   - Campo Nord, Gabbiotto: sempre control room
+   - Campo Nord, Ronda lato Sud: controllo ingressi fino alle 18:00, poi in auto
+   - Campo Nord, Ronda lato Nord (o senza lato): sempre in auto
+   - Parchi: il parco · Fotovoltaico: i pannelli solari · Casa Bartimeo: il centro Caritas
+   L'orario del cambio è riferito al giorno in cui inizia il turno: una notte che inizia alle 22 è già "dopo le 19". */
+const SCN = window.TurniScenes || {};
+const SCENE_BEFORE = 36e5; // la scena compare già un'ora prima dell'inizio
+function scenePlan(s) {
+  const info = docInfo(docById(s.src));
+  const t = info.post;
+  const split = (a, b, h) => {
+    const at = new Date(s.day.getFullYear(), s.day.getMonth(), s.day.getDate(), h, 0);
+    if (s.endAt <= at) return [{ kind: a }];
+    if (s.startAt >= at) return [{ kind: b }];
+    return [{ kind: a, until: at }, { kind: b, from: at }];
+  };
+  const ronda = /\bROND[AE]\b/.test(t);
+  const gab = !ronda && /\bGABBIOTT[OI]\b|\bTERR[AE]\s+DEL\s+SOLE\b/.test(t);
+  if (info.cat === 'CAMPO SUD') {
+    if (/\bROM\b/.test(t)) return [{ kind: 'car' }];
+    if (ronda) return split('control', 'car', 19);
+    if (gab) return split('gate', 'control', 19);
+  }
+  if (info.cat === 'CAMPO NORD') {
+    if (gab) return [{ kind: 'control' }];
+    if (ronda) return /\bLATO\s+SUD\b/.test(t) ? split('gate', 'car', 18) : [{ kind: 'car' }];
+  }
+  // campi a parte: valgono solo fuori da Campo Sud/Nord
+  if (info.cat !== 'CAMPO SUD' && info.cat !== 'CAMPO NORD') {
+    const all = info.cat + ' ' + t;
+    if (/\bFOTOVOLTAIC[OA]\b/.test(all)) return [{ kind: 'solar' }];
+    if (/\bBARTIMEO\b/.test(all)) return [{ kind: 'caritas' }];
+    if (info.cat === 'PARCHI' || /\bPARC(O|HI)\b|\bVILLA\b|\bGIARDIN|\bCAFASSO\b/.test(all)) return [{ kind: 'park' }];
+  }
+  return [];
+}
+function sceneNow(plan, now) {
+  if (!plan.length) return null;
+  const i = plan[0].until && now >= plan[0].until ? 1 : 0;
+  return { cur: plan[i], next: plan[i + 1] || null };
+}
+let heroShift = null, heroTimer = 0, heroLive = false, heroScene = false;
+// Aggiorna la scena: cambio automatico di postazione all'orario stabilito e giorno/notte in base all'ora
+function updateScene() {
+  const box = $('#heroScene');
+  if (!box || !heroShift) return;
+  const now = new Date(), st = sceneNow(box._plan, now);
+  if (!st || !SCN[st.cur.kind]) { box.hidden = true; return; }
+  box.hidden = false;
+  const hr = now.getHours();
+  box.classList.toggle('night', hr >= 19 || hr < 6);
+  const kind = st.cur.kind;
+  if (box.dataset.kind !== kind) {
+    const first = !box.dataset.kind;
+    box.dataset.kind = kind;
+    box.querySelector('.scn-art').innerHTML = SCN[kind].svg; // disegni fissi dell'app, nessun dato dell'utente
+    if (!first) {
+      box.classList.remove('swap'); void box.offsetWidth; box.classList.add('swap');
+      toast('Sono le ' + hhmm(now) + ': ora sei ' + SCN[kind].short);
+    }
+  }
+  box.querySelector('.scn-tag span').textContent = (now < heroShift.startAt ? 'Alle ' + hhmm(heroShift.startAt) + ' · ' : '')
+    + SCN[kind].label + (st.next ? ' · dalle ' + hhmm(st.next.from) + ' ' + SCN[st.next.kind].short : '');
+}
+// Conto alla rovescia del prossimo turno (o barra di avanzamento se è in corso), aggiornato ogni secondo
+function heroTick() {
+  const s = heroShift, h = $('#hero');
+  if (!s || h.hidden || !document.body.classList.contains('mode-app')) return;
+  const now = Date.now(), live = s.startAt <= now;
+  if (live !== heroLive) { render(); return; } // il turno è appena iniziato: "Turno in corso"
+  if (!heroScene && s.startAt - now <= SCENE_BEFORE) { render(); return; } // manca un'ora: compare la scena
+  const left = Math.max(0, (live ? s.endAt : s.startAt) - now);
+  const lab = $('#cdLab');
+  if (lab) lab.textContent = live ? 'Finisce tra' : 'Inizia tra';
+  const d = Math.floor(left / 864e5), hh = Math.floor(left % 864e5 / 36e5), mm = Math.floor(left % 36e5 / 6e4), ss = Math.floor(left % 6e4 / 1e3);
+  const set = (id, v, l) => { const b = $('#' + id); if (b) { b.firstChild.textContent = v; b.lastChild.textContent = l; } };
+  if (d > 0) { set('cd1', d, d === 1 ? 'giorno' : 'giorni'); set('cd2', pad2(hh), 'ore'); set('cd3', pad2(mm), 'min'); }
+  else { set('cd1', pad2(hh), 'ore'); set('cd2', pad2(mm), 'min'); set('cd3', pad2(ss), 'sec'); }
+  const bar = $('#heroProg');
+  if (bar) { bar.hidden = !live; if (live) bar.firstChild.style.width = Math.min(100, (now - s.startAt) / (s.endAt - s.startAt) * 100).toFixed(1) + '%'; }
+  updateScene();
+  if (left === 0) { clearInterval(heroTimer); heroTimer = 0; setTimeout(render, 1000); }
+}
 function renderHero(s, now) {
   const h = $('#hero');
-  if (!s) { h.hidden = true; return; }
+  heroShift = s || null;
+  if (!s) { h.hidden = true; clearInterval(heroTimer); heroTimer = 0; return; }
   h.hidden = false;
   const meta = el('div', 'meta');
   meta.append(el('span', 'chip ' + s.type.k, s.type.label));
@@ -211,18 +322,48 @@ function renderHero(s, now) {
   meta.append(el('span', '', fmtH(s.hours)));
   if (s.note) meta.append(el('span', '', s.note));
   if (s.role) meta.append(el('span', 'role', s.role));
+  const live = s.startAt <= now;
+  heroLive = live;
+  // scena della postazione: da un'ora prima dell'inizio fino alla fine del turno
+  let scene = '';
+  heroScene = s.startAt - now <= SCENE_BEFORE;
+  const plan = heroScene ? scenePlan(s) : [];
+  if (plan.length) {
+    scene = el('div', 'scn');
+    scene.id = 'heroScene';
+    scene._plan = plan;
+    const tag = el('div', 'scn-tag');
+    tag.append(el('i'), el('span'));
+    scene.append(el('div', 'scn-art'), tag);
+  }
+  const eb = el('div', 'eyebrow');
+  eb.append(el('i', 'live' + (live ? ' on' : '')), document.createTextNode(live ? 'Turno in corso' : 'Prossimo turno'));
+  const cdw = el('div', 'cdw');
+  const cd = el('div', 'cd');
+  ['cd1', 'cd2', 'cd3'].forEach((id) => { const b = el('div'); b.id = id; b.append(el('b', '', '00'), el('span', '', '')); cd.append(b); });
+  const lab = el('div', 'cd-lab', '');
+  lab.id = 'cdLab';
+  cdw.append(lab, cd);
+  const prog = el('div', 'hprog');
+  prog.id = 'heroProg';
+  prog.append(el('i'));
+  const time = el('div', 'time');
+  time.append(el('b', '', s.start + ' – ' + s.end));
   h.replaceChildren(
-    el('div', 'eyebrow', 'Prossimo turno'),
+    el('i', 'blob'), el('i', 'blob b'), el('i', 'shine'),
+    eb,
     el('div', 'when', relLabel(s, now)),
     el('div', 'date', fmtLong(s.day)),
-    el('div', 'time', s.start + ' – ' + s.end),
+    time, scene, prog, cdw,
     meta
   );
+  heroTick();
+  if (!heroTimer) heroTimer = setInterval(heroTick, 1000);
 }
 
 const monthKey = (d) => d.getFullYear() + '-' + pad2(d.getMonth() + 1);
 const fmtNum = (h) => { const r = Math.round(h * 10) / 10; return Number.isInteger(r) ? String(r) : r.toFixed(1).replace('.', ','); };
-let statsKey = null;
+let statsKey = null, statsSig = '';
 let statsKeys = [];
 function renderStats(shifts) {
   const box = $('#stats');
@@ -242,8 +383,26 @@ function renderStats(shifts) {
   const mine = shifts.filter((s) => !s.rest && monthKey(s.day) === statsKey);
   const hours = mine.reduce((a, s) => a + s.hours, 0);
   const nights = mine.filter((s) => s.night).length;
-  const mk = (v, l) => { const d = el('div', 'stat'); d.append(el('b', '', String(v)), el('span', '', l)); return d; };
-  $('#statsGrid').replaceChildren(mk(mine.length, 'Turni'), mk(fmtNum(hours), 'Ore'), mk(nights, 'Notti'));
+  // barretta: quanto del mese è già stato fatto
+  const now = new Date(), done = mine.filter((x) => x.endAt <= now);
+  const doneH = done.reduce((a, x) => a + x.hours, 0), doneN = done.filter((x) => x.night).length;
+  const pct = (a, b) => (b ? Math.round(a / b * 100) : 0);
+  const sig = statsKey + '|' + mine.length + '|' + hours + '|' + nights;
+  const animate = sig !== statsSig;
+  statsSig = sig;
+  const mk = (v, l, p, fmt, tip) => {
+    const d = el('div', 'stat'), b = el('b', '', fmt(animate ? 0 : v)), bar = el('div', 'sbar'), fill = el('i');
+    d.title = tip;
+    bar.append(fill);
+    d.append(b, el('span', '', l), bar);
+    if (animate) { countUp(b, v, fmt); setTimeout(() => { fill.style.width = p + '%'; }, 120); } else fill.style.width = p + '%';
+    return d;
+  };
+  const int = (v) => String(Math.round(v));
+  $('#statsGrid').replaceChildren(
+    mk(mine.length, 'Turni', pct(done.length, mine.length), int, done.length + ' di ' + mine.length + ' già fatti'),
+    mk(hours, 'Ore', pct(doneH, hours), fmtNum, fmtNum(doneH) + ' di ' + fmtNum(hours) + ' ore già fatte'),
+    mk(nights, 'Notti', pct(doneN, nights), int, doneN + ' di ' + nights + ' notti già fatte'));
   updatePay(hours, y, m);
 }
 
@@ -254,7 +413,7 @@ function animatePay(to) {
   cancelAnimationFrame(payRaf);
   const from = payVal, t0 = performance.now(), dur = 900;
   const done = () => { payVal = to; $('#payAmt').textContent = eur(to); };
-  if (from === to || matchMedia('(prefers-reduced-motion: reduce)').matches) { done(); return; }
+  if (from === to || reduceMotion()) { done(); return; }
   const tick = (t) => {
     const k = Math.min(1, (t - t0) / dur), e = 1 - Math.pow(1 - k, 3);
     payVal = from + (to - from) * e;
@@ -325,7 +484,7 @@ function renderList(shifts, now) {
       return;
     }
     const isToday = carry ? s === cur : s.day.getTime() === today;
-    const card = el('div', 'shift' + (isToday ? ' today' : '') + (s.endAt < now ? ' past' : '') + (s.rest ? ' rest' : ''));
+    const card = el('div', 'shift' + (isToday ? ' today' : '') + (s.endAt < now ? ' past' : '') + (s.rest ? ' rest' : ' k-' + s.type.k));
     card.style.animationDelay = (Math.min(idx, 10) * 0.04) + 's';
 
     const dbox = el('div', 'dbox');
@@ -365,6 +524,14 @@ function renderList(shifts, now) {
 
     body.append(main, sub);
     card.append(dbox, body);
+    if (!s.rest && s.startAt <= now && s.endAt >= now) {
+      // turno in corso: barra di avanzamento
+      const pr = el('div', 'prog'), pi = el('i');
+      pr.append(pi);
+      card.append(pr);
+      const p = Math.min(100, (now - s.startAt) / (s.endAt - s.startAt) * 100);
+      requestAnimationFrame(() => setTimeout(() => { pi.style.width = p.toFixed(1) + '%'; }, 250));
+    }
     list.append(card);
   });
 }
@@ -539,9 +706,12 @@ function renderMates() {
     body.append(el('p', 'grp', title));
     arr.forEach((m) => {
       const row = el('div', 'mate');
+      row.style.setProperty('--i', String(Math.min(body.querySelectorAll('.mate').length, 10)));
       const l = el('span', 'opt-l');
       l.append(el('b', '', m.name), el('span', '', m.role));
-      row.append(l, el('span', 'opt-r', m.time));
+      const av = el('span', 'av sm ' + (/ronda/i.test(m.role) ? 'c2' : /gabbiotto|terra del sole/i.test(m.role) ? 'c1' : 'c3'), initials(m.name));
+      av.setAttribute('aria-hidden', 'true');
+      row.append(av, l, el('span', 'opt-r', m.time));
       body.append(row);
     });
   };
@@ -763,6 +933,7 @@ function setView(v) {
   view = v;
   $('#tabNext').classList.toggle('on', v === 'next');
   $('#tabAll').classList.toggle('on', v === 'all');
+  $('#seg').classList.toggle('all', v === 'all');
   $('#tabNext').setAttribute('aria-selected', String(v === 'next'));
   $('#tabAll').setAttribute('aria-selected', String(v === 'all'));
   render();
@@ -878,6 +1049,7 @@ $('#welForm').addEventListener('submit', async (e) => {
   name = v;
   store.set(LS_NAME, name);
   store.set(LS_ONB, true);
+  store.set(LS_REVEAL, true); // chi si registra ora vede già il nuovo design
   $('#welHi').textContent = name;
   setStep(2);
   await wait(2300);
@@ -997,10 +1169,92 @@ window.addEventListener('online', () => { pullSchedule(); checkUpdate(); });
 setInterval(checkUpdate, 3 * 60 * 1000);
 setTimeout(checkUpdate, 2500);
 
+/* ---------- Bentornato: presentazione del nuovo design a chi aveva già l'app ---------- */
+const GIFT_MSG = 'Gennaro ci tiene molto ai suoi colleghi, questo è un regalo per voi, spero vi piaccia!';
+let typeTimer = 0;
+function revealStep(step) { $('#reveal').dataset.step = step; }
+const focusReveal = () => setTimeout(() => { try { $('#rvInput').focus({ preventScroll: true }); } catch { /* ignore */ } }, 650);
+function startReveal() {
+  setMode('');
+  $('#gate').hidden = true;
+  $('#welcome').hidden = true;
+  $('#reveal').hidden = false;
+  fillNameList();
+  if (name) { $('#rvName').textContent = name; revealStep('ask'); }
+  else { revealStep('who'); focusReveal(); }
+}
+// Il messaggio compare parola per parola, poi il pulsante OK!
+function showGift() {
+  revealStep('gift');
+  const box = $('#rvGift'), ok = $('#rvOk');
+  ok.classList.remove('show');
+  box.textContent = '';
+  clearInterval(typeTimer);
+  const words = GIFT_MSG.split(' ');
+  if (reduceMotion()) { box.textContent = GIFT_MSG; ok.classList.add('show'); return; }
+  let i = 0;
+  setTimeout(() => {
+    typeTimer = setInterval(() => {
+      box.append(el('span', 'w', (i ? ' ' : '') + words[i]));
+      if (++i >= words.length) { clearInterval(typeTimer); setTimeout(() => ok.classList.add('show'), 350); }
+    }, 110);
+  }, 700);
+}
+$('#rvYes').addEventListener('click', showGift);
+$('#rvNo').addEventListener('click', () => { revealStep('who'); $('#rvInput').value = ''; focusReveal(); });
+$('#rvForm').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const inp = $('#rvInput');
+  const v = normName(inp.value);
+  if (!v) { inp.classList.remove('bad'); void inp.offsetWidth; inp.classList.add('bad'); return; }
+  inp.blur();
+  name = v;
+  store.set(LS_NAME, name);
+  showGift();
+});
+// OK!: un cerchio rosso parte dal pulsante e riempie lo schermo, poi si apre sul nuovo design con i coriandoli
+$('#rvOk').addEventListener('click', async (e) => {
+  store.set(LS_REVEAL, true);
+  store.set(LS_ONB, true);
+  const b = $('#burst'), r = e.currentTarget.getBoundingClientRect();
+  b.style.setProperty('--x', Math.round(r.left + r.width / 2) + 'px');
+  b.style.setProperty('--y', Math.round(r.top + r.height / 2) + 'px');
+  b.hidden = false;
+  b.className = 'burst grow';
+  await wait(reduceMotion() ? 50 : 1000);
+  $('#reveal').hidden = true;
+  enterMain(true);
+  window.scrollTo(0, 0);
+  b.className = 'burst grow open';
+  confetti();
+  await wait(reduceMotion() ? 50 : 900);
+  b.hidden = true;
+  b.className = 'burst';
+});
+function confetti() {
+  if (reduceMotion()) return;
+  const box = el('div', 'confetti');
+  box.setAttribute('aria-hidden', 'true');
+  const colors = ['#b23338', '#d2474d', '#ffb3b6', '#121214', '#fbbf24', '#4ade80', '#ffffff'];
+  for (let i = 0; i < 70; i++) {
+    const c = el('i');
+    c.style.setProperty('--l', (Math.random() * 100).toFixed(1) + '%');
+    c.style.setProperty('--c', colors[i % colors.length]);
+    c.style.setProperty('--d', (Math.random() * 0.6).toFixed(2) + 's');
+    c.style.setProperty('--t', (1.8 + Math.random() * 1.4).toFixed(2) + 's');
+    c.style.setProperty('--r', Math.round(Math.random() * 720 - 360) + 'deg');
+    c.style.setProperty('--dx', Math.round(Math.random() * 120 - 60) + 'px');
+    box.append(c);
+  }
+  document.body.append(box);
+  setTimeout(() => box.remove(), 3800);
+}
+
 function boot() {
   const onboarded = store.get(LS_ONB, false) || !!store.get(LS_NAME, '');
   if (!isStandalone) { showGate(); return; }
   if (!onboarded) { startWelcome(); return; }
+  if (!store.get(LS_REVEAL, false)) { startReveal(); return; }
   enterMain(false);
 }
 
