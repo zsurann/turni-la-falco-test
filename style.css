@@ -482,3 +482,16 @@ button:focus-visible,input:focus-visible{outline:3px solid var(--red-2);outline-
   .shine,.big::after,.prog i::after,.deco *{display:none}
   .scn-art *{animation:none!important}
 }
+
+/* Richiesta delle notifiche all'apertura */
+.ask{position:fixed;inset:0;z-index:30;display:flex;align-items:center;justify-content:center;padding:22px}
+.ask-bg{position:absolute;inset:0;background:rgba(12,12,14,.55);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);animation:fade .3s var(--ease)}
+.ask-card{position:relative;width:100%;max-width:360px;background:#fff;color:var(--ink,#121214);border-radius:26px;padding:26px 22px 16px;text-align:center;box-shadow:0 30px 70px rgba(0,0,0,.35);animation:askIn .45s var(--spring) both;outline:0}
+.ask-ico{width:62px;height:62px;margin:0 auto 14px;border-radius:20px;display:grid;place-items:center;color:#fff;background:linear-gradient(135deg,var(--red-2),var(--red-d));box-shadow:0 12px 26px rgba(178,51,56,.38)}
+.ask-ico svg{transform-origin:50% 10%;animation:askRing 2.6s 0.6s ease-in-out infinite}
+.ask-card h3{margin:0 0 8px;font-size:21px;font-weight:800}
+.ask-card p{margin:0 0 18px;font-size:15px;line-height:1.45;color:#55555c}
+.ask-no{width:100%;border:0;background:none;font:inherit;font-size:15px;font-weight:700;color:#6b6b73;padding:14px;margin-top:4px;cursor:pointer}
+@keyframes askIn{from{opacity:0;transform:translateY(24px) scale(.94)}to{opacity:1;transform:none}}
+@keyframes askRing{0%,60%,100%{transform:rotate(0)}66%{transform:rotate(14deg)}72%{transform:rotate(-12deg)}78%{transform:rotate(8deg)}84%{transform:rotate(-5deg)}90%{transform:rotate(0)}}
+@media (prefers-reduced-motion:reduce){.ask-card,.ask-ico svg,.ask-bg{animation:none}}
