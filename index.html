@@ -110,6 +110,16 @@
       <div class="sh-body" id="shBody"></div>
     </div>
   </div>
+  <div id="askNotif" class="ask" hidden>
+    <div class="ask-bg"></div>
+    <div class="ask-card" role="dialog" aria-modal="true" aria-labelledby="askTitle" aria-describedby="askText" tabindex="-1">
+      <div class="ask-ico" aria-hidden="true"><svg viewBox="0 0 24 24" width="30" height="30"><path d="M6 16V11a6 6 0 1 1 12 0v5l1.5 2h-15L6 16zM10 21h4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+      <h3 id="askTitle">Consenti le notifiche</h3>
+      <p id="askText"></p>
+      <button id="askYes" class="big" type="button">Consenti notifiche</button>
+      <button id="askNo" class="ask-no" type="button">Non ora</button>
+    </div>
+  </div>
   <div id="update" class="update" role="status" hidden>
     <span>Nuova versione disponibile</span>
     <button id="updBtn" type="button">Aggiorna</button>

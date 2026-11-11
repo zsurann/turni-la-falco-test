@@ -729,6 +729,7 @@ const pushOK = !!PUSH_URL && 'serviceWorker' in navigator && 'PushManager' in wi
 const LS_PUSH = 'turni.push.v1', LS_PUSHSIG = 'turni.push.sig', LS_UPD = 'turni.updates.v1';
 let pushOn = store.get(LS_PUSH, false), pushTimer = 0, pushBusy = false;
 let updOn = store.get(LS_UPD, true); // avviso quando il responsabile pubblica nuovi turni
+const bytesB64 = (buf) => { let s = ''; for (const c of new Uint8Array(buf)) s += String.fromCharCode(c); return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); };
 const keyBytes = (s) => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0));
 async function pushPost(path, body) {
   const r = await fetch(PUSH_URL + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
@@ -785,6 +786,7 @@ async function enablePush() {
 async function disablePush() {
   try { const sub = await pushSub(); if (sub) { await pushPost('/api/unsub', { endpoint: sub.endpoint }).catch(() => {}); await sub.unsubscribe(); } } catch { /* ignore */ }
   pushOn = false; store.set(LS_PUSH, false);
+  updOn = false; store.set(LS_UPD, false);
   disableUpdates();
 }
 
@@ -861,7 +863,10 @@ function renderRemind() {
     body.append(switchOpt('Turni pubblicati', 'Quando il responsabile pubblica o cambia i turni', updOn, async () => {
       updOn = !updOn;
       store.set(LS_UPD, updOn);
-      if (pushOn) { if (updOn) await enableUpdates(); else await disableUpdates(); }
+      if (!updOn) await disableUpdates();
+      else if (Notification.permission === 'granted') await enableUpdates();
+      else if (Notification.permission === 'denied') toast('Notifiche bloccate: attivale dalle impostazioni del telefono');
+      else if ((await Notification.requestPermission()) === 'granted') await enableUpdates();
       renderRemind();
     }));
   }
@@ -1066,6 +1071,7 @@ function enterMain(animate) {
   if (animate) { document.body.classList.add('enter'); setTimeout(() => document.body.classList.remove('enter'), 900); }
   $('#gate').hidden = true;
   render();
+  setTimeout(checkNotif, animate ? 2200 : 700);
 }
 
 /* ---------- Aggiornamento dell'app ---------- */
@@ -1130,6 +1136,7 @@ const NOTIFY_SCOPE = 'notify/';
 async function notifyReg() {
   let reg = await navigator.serviceWorker.getRegistration(NOTIFY_SCOPE);
   if (!reg) reg = await navigator.serviceWorker.register('notify/sw.js', { scope: NOTIFY_SCOPE });
+  else reg.update().catch(() => {}); // così arriva anche il nuovo testo della notifica
   if (!reg.active) {
     const w = reg.installing || reg.waiting;
     if (w) await new Promise((res) => { if (w.state === 'activated') return res(); w.addEventListener('statechange', () => { if (w.state === 'activated') res(); }); });
@@ -1141,11 +1148,14 @@ async function enableUpdates() {
   try {
     const reg = await notifyReg();
     let sub = await reg.pushManager.getSubscription();
-    if (!sub) {
-      const { key } = await (await fetch(API_URL + '/api/vapid')).json();
-      if (!key) return false;
-      sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: keyBytes(key) });
+    const { key } = await (await fetch(API_URL + '/api/vapid')).json();
+    if (!key) return false;
+    // iscrizione fatta con una chiave diversa da quella del server: non riceverebbe nulla, va rifatta
+    if (sub && sub.options && sub.options.applicationServerKey && bytesB64(sub.options.applicationServerKey) !== key.replace(/=+$/, '')) {
+      await sub.unsubscribe();
+      sub = null;
     }
+    if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: keyBytes(key) });
     const r = await fetch(API_URL + '/api/sub', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ endpoint: sub.endpoint }) });
     return r.ok;
   } catch { return false; }
@@ -1158,14 +1168,61 @@ async function disableUpdates() {
   } catch { /* ignore */ }
 }
 
+/* ---------- Richiesta delle notifiche: a ogni apertura, finché non sono consentite ---------- */
+const notifOK = !!API_URL && 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+let askBusy = false, hiddenAt = 0;
+function askShow() {
+  const blocked = Notification.permission === 'denied';
+  $('#askTitle').textContent = blocked ? 'Le notifiche sono bloccate' : 'Consenti le notifiche';
+  $('#askText').textContent = blocked
+    ? 'Così non ricevi l\'avviso quando il responsabile pubblica i turni. Per attivarle apri le Impostazioni del telefono, cerca "Turni La Falco" tra le app e consenti le notifiche.'
+    : 'Ti avviso subito quando il responsabile pubblica i nuovi turni, e prima di ogni tuo turno. Puoi cambiare idea quando vuoi da "Promemoria".';
+  $('#askYes').hidden = blocked;
+  $('#askYes').disabled = false;
+  $('#askYes').textContent = 'Consenti notifiche';
+  $('#askNo').textContent = blocked ? 'Ho capito' : 'Non ora';
+  $('#askNotif').hidden = false;
+  $('#askNotif .ask-card').focus();
+}
+function askHide() { $('#askNotif').hidden = true; }
+// Già consentite: non mostra niente e tiene viva l'iscrizione. Altrimenti chiede il consenso.
+function checkNotif() {
+  if (!notifOK || !document.body.classList.contains('mode-app')) return;
+  if (Notification.permission === 'granted') {
+    askHide();
+    if (updOn) enableUpdates();
+    return;
+  }
+  if ($('#askNotif').hidden && $('#sheet').hidden) askShow();
+}
+$('#askNo').addEventListener('click', askHide);
+$('#askYes').addEventListener('click', async () => {
+  if (askBusy) return;
+  askBusy = true;
+  const b = $('#askYes');
+  b.disabled = true; b.textContent = 'Attivazione…';
+  try {
+    const perm = await Notification.requestPermission();
+    if (perm !== 'granted') { if (perm === 'denied') askShow(); else { askHide(); toast('Notifiche non consentite'); } return; }
+    updOn = true; store.set(LS_UPD, true);
+    const ok = await enableUpdates(); // prima l'avviso dei turni pubblicati, che non dipende dai promemoria
+    if (pushOK && !pushOn) { try { await enablePush(); } catch { /* i promemoria si attivano poi da "Promemoria" */ } }
+    askHide();
+    toast(ok ? 'Notifiche attivate' : 'Notifiche consentite: completo l\'attivazione appena torna la rete');
+    render();
+  } catch { askHide(); toast('Non sono riuscito ad attivarle: riprova da "Promemoria"'); }
+  finally { askBusy = false; }
+});
+
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState !== 'visible') return;
+  if (document.visibilityState !== 'visible') { hiddenAt = Date.now(); return; }
+  if (Date.now() - hiddenAt > 60 * 1000) checkNotif(); // riaperta dopo essere stata messa da parte
   pullSchedule();
   checkUpdate();
   if (document.body.classList.contains('mode-app')) render(); // passata la mezzanotte, "oggi" e "prossimo turno" si aggiornano
 });
 setInterval(() => { if (document.visibilityState === 'visible') pullSchedule(); }, 5 * 60 * 1000);
-window.addEventListener('online', () => { pullSchedule(); checkUpdate(); });
+window.addEventListener('online', () => { pullSchedule(); checkUpdate(); if (notifOK && updOn && Notification.permission === 'granted') enableUpdates(); });
 setInterval(checkUpdate, 3 * 60 * 1000);
 setTimeout(checkUpdate, 2500);
 
@@ -1263,5 +1320,4 @@ if ('serviceWorker' in navigator) {
 }
 
 pullSchedule();
-if (pushOn && updOn) enableUpdates();
 boot();
