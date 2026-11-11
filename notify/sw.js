@@ -4,18 +4,19 @@ try { importScripts('../config.js'); } catch (e) { /* senza avvisi */ }
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
 
-const TITLE = 'Nuovi Turni Pubblicati!';
+const TITLE = '📅 Nuovi turni pubblicati!';
+const HINT = 'Tocca per vedere i tuoi.';
 const API = String(self.TURNI_API || '').replace(/\/$/, '');
 
 self.addEventListener('push', (e) => {
   e.waitUntil((async () => {
-    let n = { body: 'Apri l\'app per vedere i tuoi turni.' };
+    let n = { body: 'Il responsabile ha pubblicato i turni.' };
     try {
       const api = String(self.TURNI_API || '').replace(/\/$/, '');
       if (api) { const r = await fetch(api + '/api/notice', { cache: 'no-store' }); if (r.ok) n = { ...n, ...(await r.json()) }; }
     } catch (err) { /* offline: testo generico */ }
     await self.registration.showNotification(TITLE, {
-      body: n.body || '', icon: '../icon-192.png', badge: '../favicon.png', tag: 'turni-agg', renotify: true,
+      body: ((n.body || '') + ' ' + HINT).trim(), icon: '../icon-192.png', badge: '../favicon.png', tag: 'turni-agg', renotify: true, vibrate: [120, 60, 120],
     });
   })());
 });
