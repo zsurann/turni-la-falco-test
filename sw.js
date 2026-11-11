@@ -2,7 +2,7 @@
    se sei offline usa la copia salvata.
    IMPORTANTE: a ogni rilascio aumenta il numero in CACHE, così le app installate si aggiornano. */
 try { importScripts('config.js'); } catch (e) { /* senza notifiche push */ }
-const CACHE = 'turni-test-v4';
+const CACHE = 'turni-test-v5';
 const ASSETS = [
   './', 'index.html', 'style.css', 'app.js', 'shifts.js', 'scenes.js', 'manifest.webmanifest',
   'logo.png', 'favicon.png', 'icon-192.png', 'icon-512.png', 'icon-maskable-512.png', 'config.js',
@@ -53,7 +53,19 @@ self.addEventListener('push', (e) => {
         }
       } catch (err) { /* offline: notifica generica */ }
     }
-    if (!list.length) list = [{ title: 'Turni La Falco', body: 'Hai un promemoria per il tuo turno.' }];
+    if (!list.length) {
+      // Nessun promemoria in scadenza: se il responsabile ha appena pubblicato, la push è l'avviso dei nuovi turni
+      try {
+        const api = String(self.TURNI_API || '').replace(/\/$/, '');
+        const r = api && await fetch(api + '/api/notice', { cache: 'no-store' });
+        const n = r && r.ok ? await r.json() : null;
+        if (n && n.id && Date.now() - n.id < 15 * 60 * 1000) {
+          await self.registration.showNotification('📅 Nuovi turni pubblicati!', { body: ((n.body || 'Il responsabile ha pubblicato i turni.') + ' Tocca per vedere i tuoi.').trim(), icon: 'icon-192.png', badge: 'favicon.png', tag: 'turni-agg', renotify: true, vibrate: [120, 60, 120] });
+          return;
+        }
+      } catch (err) { /* offline: promemoria generico */ }
+      list = [{ title: 'Turni La Falco', body: 'Hai un promemoria per il tuo turno.' }];
+    }
     for (const n of list) {
       await self.registration.showNotification(n.title || 'Turni La Falco', { body: n.body || '', icon: 'icon-192.png', badge: 'favicon.png', tag: n.id === 'test' ? 'test-' + Date.now() : (n.id || 'turno'), renotify: true });
     }
