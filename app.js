@@ -1117,23 +1117,6 @@ $('#updBtn').addEventListener('click', async () => {
   location.reload();
 });
 
-/* ---------- Codice d'accesso ai turni (lo chiede il Worker se il responsabile l'ha impostato) ---------- */
-const LS_CODE = 'turni.code.v1';
-function codeShow(wrong) {
-  const inp = $('#codeInput');
-  $('#codeText').textContent = wrong ? 'Codice non valido. Controlla e riprova, oppure chiedilo al responsabile.' : 'Scrivi il codice che ti ha dato il responsabile. Serve una volta sola.';
-  inp.classList.toggle('bad', wrong);
-  $('#codeAsk').hidden = false;
-  inp.focus();
-}
-$('#codeForm').addEventListener('submit', (e) => {
-  e.preventDefault();
-  const v = $('#codeInput').value.trim().toUpperCase();
-  if (!v) return;
-  store.set(LS_CODE, v);
-  pullSchedule(true);
-});
-
 /* ---------- Turni pubblicati dal responsabile ---------- */
 let pulling = false;
 async function pullSchedule(manual) {
@@ -1141,13 +1124,8 @@ async function pullSchedule(manual) {
   if (pulling) return;
   pulling = true;
   try {
-    // l'intestazione parte solo se c'è un codice salvato (cioè solo con il Worker che lo chiede)
-    const code = store.get(LS_CODE, '');
-    const r = await fetch(API_URL + '/api/schedule', { cache: 'no-store', headers: code ? { 'x-turni-code': code } : {} });
-    if (r.status === 401) { codeShow(!!code); return; }
-    if (r.status === 429) { toast('Troppi tentativi: riprova tra qualche minuto'); return; }
+    const r = await fetch(API_URL + '/api/schedule', { cache: 'no-store' });
     if (!r.ok) throw new Error('server ' + r.status);
-    $('#codeAsk').hidden = true;
     const d = await r.json();
     store.set(LS_RCHK, Date.now());
     const prev = store.get(LS_RVER, null);
