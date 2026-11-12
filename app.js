@@ -116,16 +116,21 @@ function decorate(s) {
   const out = { ...s, day, startAt, endAt, hours: (endAt - startAt) / 36e5, type, night: endAt > nextMidnight, role: roleOf(s) };
   // Notte al Gabbiotto di Campo Sud: il cambio arriva dalla Ronda di Campo Sud
   if (out.night && !s.rest && docInfo(docById(s.src)).post === 'CAMPO SUD GABBIOTTO') {
-    const mates = rondaSudCambio(nextMidnight, s.end);
+    const mates = cambioAt('CAMPO SUD RONDA', nextMidnight, s.end);
+    if (mates.length) out.mates = mates;
+  }
+  // Notte dell'ultimo giorno del mese: il cambio sta nel foglio del mese dopo
+  if (out.night && !s.rest && !(out.mates || []).length) {
+    const mates = cambioAt(docInfo(docById(s.src)).post, nextMidnight, s.end);
     if (mates.length) out.mates = mates;
   }
   return out;
 }
 function iso(d) { return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()); }
-function rondaSudCambio(day, at) {
+function cambioAt(post, day, at) {
   const names = [];
   docs.forEach((d) => {
-    if (docInfo(d).post !== 'CAMPO SUD RONDA') return;
+    if (docInfo(d).post !== post) return;
     P.dayOperators(d, iso(day)).forEach((op) => {
       if (op.start === at && !P.nameMatches(op.name, name) && !names.includes(op.name)) names.push(op.name);
     });
@@ -406,9 +411,10 @@ function renderStats(shifts) {
   updatePay(hours, y, m);
 }
 
-const RATE = 6;
+const LS_RATE = 'turni.rate.v1';
+let rate = +store.get(LS_RATE, 6) || 6; // paga oraria scelta dal dipendente, resta sul suo telefono
 const eur = (v) => new Intl.NumberFormat('it-IT', { style: 'currency', currency: 'EUR' }).format(v);
-let payOpen = false, payVal = 0, payRaf = 0, payTarget = 0;
+let payOpen = false, payVal = 0, payRaf = 0, payTarget = 0, payArgs = null;
 function animatePay(to) {
   cancelAnimationFrame(payRaf);
   const from = payVal, t0 = performance.now(), dur = 900;
@@ -423,10 +429,12 @@ function animatePay(to) {
   payRaf = requestAnimationFrame(tick);
 }
 function updatePay(hours, y, m) {
-  const total = Math.round(hours * RATE * 100) / 100;
+  const total = Math.round(hours * rate * 100) / 100;
+  payArgs = [hours, y, m];
+  if (document.activeElement !== $('#payRate')) $('#payRate').value = String(rate).replace('.', ',');
   const ended = new Date(y, m, 1) <= startOfToday();
-  $('#payTitle').textContent = 'Stipendio ' + MESI[m - 1] + ' ' + y;
-  $('#payCalc').textContent = fmtNum(hours) + ' ore × ' + eur(RATE).replace(',00', '') + ' all\'ora';
+  $('#payTitle').textContent = 'Stima stipendio ' + MESI[m - 1] + ' ' + y;
+  $('#payCalc').textContent = fmtNum(hours) + ' ore × ' + eur(rate).replace(',00', '') + ' all\'ora';
   $('#payNote').textContent = ended
     ? 'Mese concluso: calcolato su tutte le ore del mese.'
     : 'Mese in corso: calcolato sulle ore attuali del riepilogo.';
@@ -441,6 +449,13 @@ function togglePay() {
   if (payOpen) { payVal = 0; animatePay(payTarget); } else cancelAnimationFrame(payRaf);
 }
 $('#payBtn').addEventListener('click', togglePay);
+$('#payRate').addEventListener('input', (e) => {
+  const v = parseFloat(e.target.value.replace(',', '.'));
+  if (!(v > 0 && v < 1000)) return; // valore non valido: resta la paga di prima
+  rate = Math.round(v * 100) / 100;
+  store.set(LS_RATE, rate);
+  if (payArgs) updatePay(...payArgs);
+});
 
 function stepMonth(dir) {
   const k = statsKeys[statsKeys.indexOf(statsKey) + dir];
@@ -1102,6 +1117,23 @@ $('#updBtn').addEventListener('click', async () => {
   location.reload();
 });
 
+/* ---------- Codice d'accesso ai turni (lo chiede il Worker se il responsabile l'ha impostato) ---------- */
+const LS_CODE = 'turni.code.v1';
+function codeShow(wrong) {
+  const inp = $('#codeInput');
+  $('#codeText').textContent = wrong ? 'Codice non valido. Controlla e riprova, oppure chiedilo al responsabile.' : 'Scrivi il codice che ti ha dato il responsabile. Serve una volta sola.';
+  inp.classList.toggle('bad', wrong);
+  $('#codeAsk').hidden = false;
+  inp.focus();
+}
+$('#codeForm').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const v = $('#codeInput').value.trim().toUpperCase();
+  if (!v) return;
+  store.set(LS_CODE, v);
+  pullSchedule(true);
+});
+
 /* ---------- Turni pubblicati dal responsabile ---------- */
 let pulling = false;
 async function pullSchedule(manual) {
@@ -1109,8 +1141,13 @@ async function pullSchedule(manual) {
   if (pulling) return;
   pulling = true;
   try {
-    const r = await fetch(API_URL + '/api/schedule', { cache: 'no-store' });
+    // l'intestazione parte solo se c'è un codice salvato (cioè solo con il Worker che lo chiede)
+    const code = store.get(LS_CODE, '');
+    const r = await fetch(API_URL + '/api/schedule', { cache: 'no-store', headers: code ? { 'x-turni-code': code } : {} });
+    if (r.status === 401) { codeShow(!!code); return; }
+    if (r.status === 429) { toast('Troppi tentativi: riprova tra qualche minuto'); return; }
     if (!r.ok) throw new Error('server ' + r.status);
+    $('#codeAsk').hidden = true;
     const d = await r.json();
     store.set(LS_RCHK, Date.now());
     const prev = store.get(LS_RVER, null);
@@ -1199,6 +1236,14 @@ function checkNotif() {
   if ($('#askNotif').hidden && $('#sheet').hidden) askShow();
 }
 $('#askNo').addEventListener('click', askHide);
+$('#askNotif').addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') return askHide();
+  if (e.key !== 'Tab') return;
+  const f = [...$('#askNotif').querySelectorAll('button')].filter((b) => !b.hidden);
+  const i = f.indexOf(document.activeElement);
+  e.preventDefault();
+  f[(i + (e.shiftKey ? f.length - 1 : 1)) % f.length].focus(); // Tab resta dentro la finestra
+});
 $('#askYes').addEventListener('click', async () => {
   if (askBusy) return;
   askBusy = true;

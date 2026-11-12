@@ -497,3 +497,10 @@ button:focus-visible,input:focus-visible{outline:3px solid var(--red-2);outline-
 @keyframes askIn{from{opacity:0;transform:translateY(24px) scale(.94)}to{opacity:1;transform:none}}
 @keyframes askRing{0%,60%,100%{transform:rotate(0)}66%{transform:rotate(14deg)}72%{transform:rotate(-12deg)}78%{transform:rotate(8deg)}84%{transform:rotate(-5deg)}90%{transform:rotate(0)}}
 @media (prefers-reduced-motion:reduce){.ask-card,.ask-ico svg,.ask-bg{animation:none}}
+
+/* Paga oraria e codice d'accesso */
+.pay-rate{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:12px;font-size:13px;color:rgba(255,255,255,.9)}
+.pay-rate input{width:92px;font:inherit;font-size:16px;font-weight:800;text-align:right;color:#fff;background:rgba(255,255,255,.14);border:1.5px solid rgba(255,255,255,.3);border-radius:12px;padding:8px 10px}
+.ask-in{width:100%;font:inherit;font-size:20px;font-weight:800;letter-spacing:.08em;text-align:center;text-transform:uppercase;color:var(--ink);background:#f6f4f1;border:1.5px solid #d9d4cf;border-radius:16px;padding:14px;margin-bottom:14px}
+.ask-in.bad{border-color:var(--red);animation:shake .4s}
+#codeAsk{z-index:60}

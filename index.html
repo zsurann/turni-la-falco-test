@@ -56,6 +56,7 @@
             <div class="pay-eyebrow" id="payTitle"></div>
             <div class="pay-amt" id="payAmt">0,00 €</div>
             <div class="pay-calc" id="payCalc"></div>
+            <label class="pay-rate" for="payRate">La tua paga oraria (€)<input id="payRate" type="text" inputmode="decimal" maxlength="6" autocomplete="off"></label>
             <div class="pay-note" id="payNote"></div>
           </div>
         </div>
@@ -109,6 +110,15 @@
       <div class="steps" id="shSteps"></div>
       <div class="sh-body" id="shBody"></div>
     </div>
+  </div>
+  <div id="codeAsk" class="ask" hidden>
+    <div class="ask-bg"></div>
+    <form id="codeForm" class="ask-card" role="dialog" aria-modal="true" aria-labelledby="codeTitle" aria-describedby="codeText" autocomplete="off">
+      <h3 id="codeTitle">Codice d'accesso</h3>
+      <p id="codeText">Scrivi il codice che ti ha dato il responsabile. Serve una volta sola.</p>
+      <input id="codeInput" class="ask-in" type="text" maxlength="40" autocapitalize="characters" spellcheck="false" aria-labelledby="codeTitle">
+      <button class="big" type="submit">Entra</button>
+    </form>
   </div>
   <div id="askNotif" class="ask" hidden>
     <div class="ask-bg"></div>
