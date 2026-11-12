@@ -1077,7 +1077,7 @@ function enterMain(animate) {
 /* ---------- Aggiornamento dell'app ---------- */
 async function siteSig() {
   let h = 2166136261;
-  for (const f of ['index.html', 'app.js', 'shifts.js', 'style.css', 'sw.js', 'config.js']) {
+  for (const f of ['index.html', 'app.js', 'shifts.js', 'scenes.js', 'style.css', 'sw.js', 'notify/sw.js', 'config.js']) {
     const r = await fetch(f, { cache: 'no-store' });
     if (!r.ok) throw new Error('x');
     const t = await r.text();
@@ -1152,11 +1152,14 @@ async function enableUpdates() {
     if (!key) return false;
     // iscrizione fatta con una chiave diversa da quella del server: non riceverebbe nulla, va rifatta
     if (sub && sub.options && sub.options.applicationServerKey && bytesB64(sub.options.applicationServerKey) !== key.replace(/=+$/, '')) {
+      await fetch(API_URL + '/api/unsub', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ endpoint: sub.endpoint }) }).catch(() => {});
       await sub.unsubscribe();
       sub = null;
     }
     if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: keyBytes(key) });
-    const r = await fetch(API_URL + '/api/sub', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ endpoint: sub.endpoint }) });
+    // con le chiavi il server può mettere il testo dentro la notifica (arriva anche se il telefono in quel momento non ha rete)
+    const keys = (sub.toJSON && sub.toJSON().keys) || null;
+    const r = await fetch(API_URL + '/api/sub', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ endpoint: sub.endpoint, keys }) });
     return r.ok;
   } catch { return false; }
 }

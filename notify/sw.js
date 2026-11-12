@@ -11,12 +11,16 @@ const API = String(self.TURNI_API || '').replace(/\/$/, '');
 self.addEventListener('push', (e) => {
   e.waitUntil((async () => {
     let n = { body: 'Il responsabile ha pubblicato i turni.' };
-    try {
-      const api = String(self.TURNI_API || '').replace(/\/$/, '');
-      if (api) { const r = await fetch(api + '/api/notice', { cache: 'no-store' }); if (r.ok) n = { ...n, ...(await r.json()) }; }
-    } catch (err) { /* offline: testo generico */ }
+    let inside = null; // testo arrivato dentro la push
+    try { inside = e.data && e.data.json(); } catch (err) { /* push senza testo */ }
+    if (inside && inside.body) n = { ...n, body: inside.body };
+    else {
+      try {
+        if (API) { const r = await fetch(API + '/api/notice', { cache: 'no-store' }); if (r.ok) n = { ...n, ...(await r.json()) }; }
+      } catch (err) { /* offline: testo generico */ }
+    }
     await self.registration.showNotification(TITLE, {
-      body: ((n.body || '') + ' ' + HINT).trim(), icon: '../icon-192.png', badge: '../favicon.png', tag: 'turni-agg', renotify: true, vibrate: [120, 60, 120],
+      body: (/Tocca per/.test(n.body || '') ? n.body : ((n.body || '') + ' ' + HINT).trim()), icon: '../icon-192.png', badge: '../favicon.png', tag: 'turni-agg', renotify: true, vibrate: [120, 60, 120],
     });
   })());
 });
@@ -32,7 +36,7 @@ self.addEventListener('pushsubscriptionchange', (e) => {
         const bytes = Uint8Array.from(atob(key.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0));
         sub = await self.registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: bytes });
       }
-      await fetch(API + '/api/sub', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ endpoint: sub.endpoint }) });
+      await fetch(API + '/api/sub', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ endpoint: sub.endpoint, keys: (sub.toJSON && sub.toJSON().keys) || null }) });
     } catch (err) { /* alla prossima apertura l'app rifà l'iscrizione */ }
   })());
 });
