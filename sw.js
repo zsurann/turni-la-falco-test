@@ -2,7 +2,7 @@
    se sei offline usa la copia salvata.
    IMPORTANTE: a ogni rilascio aumenta il numero in CACHE, così le app installate si aggiornano. */
 try { importScripts('config.js'); } catch (e) { /* senza notifiche push */ }
-const CACHE = 'turni-test-v10';
+const CACHE = 'turni-test-v11';
 const ASSETS = [
   './', 'index.html', 'style.css', 'app.js', 'shifts.js', 'scenes.js', 'manifest.webmanifest',
   'logo.png', 'favicon.png', 'icon-192.png', 'icon-512.png', 'icon-maskable-512.png', 'config.js',

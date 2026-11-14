@@ -208,6 +208,7 @@ function render() {
   renderStats(shifts);
   renderList(shifts, now);
   renderSource();
+  renderSimple(shifts);
   fillNameList();
   schedulePush();
 
@@ -226,6 +227,44 @@ function render() {
   }
   $('#shiftsSection').hidden = !shifts.length;
 }
+
+/* ---------- Versione semplice: scritte grandi, un giorno per schermata, solo orario, posto e cambio ---------- */
+const LS_SIMPLE = 'turni.simple.v1';
+let simple = store.get(LS_SIMPLE, false), simpleOff = 0; // simpleOff: giorni di distanza da oggi
+function dayWord(off, d) { return off === 0 ? 'Oggi' : off === 1 ? 'Domani' : off === -1 ? 'Ieri' : GIORNI[d.getDay()]; }
+function renderSimple(shifts) {
+  document.body.classList.toggle('simple', simple);
+  const box = $('#simple');
+  box.hidden = !simple;
+  if (!simple) return;
+  const t0 = startOfToday(), at = (off) => new Date(t0.getFullYear(), t0.getMonth(), t0.getDate() + off);
+  const real = shifts.filter((s) => !s.pending);
+  // non si esce dai giorni pubblicati (oggi resta sempre raggiungibile)
+  const min = real.length ? Math.min(0, Math.round((real[0].day - t0) / 864e5)) : 0;
+  const max = real.length ? Math.max(0, Math.round((real[real.length - 1].day - t0) / 864e5)) : 0;
+  simpleOff = Math.max(min, Math.min(max, simpleOff));
+  const day = at(simpleOff), mine = real.filter((s) => iso(s.day) === iso(day));
+  const work = mine.filter((s) => !s.rest);
+  const card = el('div', 'sm-card');
+  card.append(el('span', 'sm-tag', dayWord(simpleOff, day).toUpperCase()), el('div', 'sm-date', fmtLong(day)));
+  if (work.length) work.forEach((s) => {
+    const info = docInfo(docById(s.src));
+    card.append(el('div', 'sm-time', s.start + ' – ' + s.end), el('div', 'sm-place', info.catName && info.short !== info.catName ? info.catName + ' · ' + info.short : s.role));
+    const cg = el('div', 'sm-cambio');
+    if (s.mates.length) cg.append(el('span', '', 'Ti dà il cambio'), el('b', '', s.mates.join(', ')), el('span', '', 'alle ' + s.end));
+    else cg.append(el('span', '', 'Cambio da definire'));
+    card.append(cg);
+  });
+  else card.append(el('div', 'sm-rest', mine.length ? 'Riposo' : !docs.length ? 'Turni non ancora pubblicati' : !real.length ? 'Nessun turno per ' + name : 'Turni non ancora pubblicati'));
+  const nav = el('div', 'sm-nav');
+  const go = (off, txt) => { const b = el('button', 'sm-btn', txt); b.type = 'button'; b.disabled = off < min || off > max; b.addEventListener('click', () => { simpleOff = off; render(); scrollTo(0, 0); }); return b; };
+  nav.append(go(simpleOff - 1, '◀ ' + dayWord(simpleOff - 1, at(simpleOff - 1))), go(simpleOff + 1, dayWord(simpleOff + 1, at(simpleOff + 1)) + ' ▶'));
+  const today = go(0, 'Torna a oggi'); today.classList.add('sm-today'); today.hidden = Math.abs(simpleOff) < 2;
+  const back = el('button', 'sm-btn sm-out', 'Torna alla versione normale'); back.type = 'button';
+  back.addEventListener('click', () => setSimple(false));
+  box.replaceChildren(el('div', 'sm-hi', 'Ciao ' + name), card, nav, today, back);
+}
+function setSimple(on) { simple = on; simpleOff = 0; store.set(LS_SIMPLE, on); render(); scrollTo(0, 0); }
 
 /* ---------- Scena animata della postazione ----------
    Dove si trova l'operatore, in base a categoria, postazione e ora (come nell'app principale):
@@ -948,6 +987,7 @@ $('#nameForm').addEventListener('submit', (e) => {
   toast(n ? 'Trovati ' + n + (n === 1 ? ' turno' : ' turni') + ' per ' + v : 'Nessun turno per ' + v + ' nei turni pubblicati');
 });
 $('#refreshBtn').addEventListener('click', () => pullSchedule(true));
+$('#simpleBtn').addEventListener('click', () => setSimple(true));
 
 function setView(v) {
   view = v;
@@ -1245,6 +1285,7 @@ document.addEventListener('visibilitychange', () => {
   if (Date.now() - hiddenAt > 60 * 1000) checkNotif(); // riaperta dopo essere stata messa da parte
   pullSchedule();
   checkUpdate();
+  if (Date.now() - hiddenAt > 60 * 1000) simpleOff = 0; // versione semplice: riaprendo l'app si riparte da oggi
   if (document.body.classList.contains('mode-app')) render(); // passata la mezzanotte, "oggi" e "prossimo turno" si aggiornano
 });
 setInterval(() => { if (document.visibilityState === 'visible') pullSchedule(); }, 5 * 60 * 1000);
